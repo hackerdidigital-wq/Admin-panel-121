@@ -16,6 +16,7 @@ function getLocalWorkerEnv(): WorkerEnv {
     GEMINI_API_KEY: process.env.GEMINI_API_KEY,
     EMAIL_PROVIDER_URL: process.env.EMAIL_PROVIDER_URL,
     PUSH_PROVIDER_URL: process.env.PUSH_PROVIDER_URL,
+    APP_URL: process.env.APP_URL,
     APP_ENV: process.env.NODE_ENV || 'development',
   };
 }

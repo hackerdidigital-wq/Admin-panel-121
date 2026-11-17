@@ -46,9 +46,8 @@ interface AuthContextValue {
   toggleTheme: () => void;
   setThemeMode: (mode: 'light' | 'dark') => void;
   hasPerm: (perm: string | string[]) => boolean;
-  setupInitialAdmin: (input: { email: string; displayName: string; password: string }) => Promise<void>;
+  setupInitialAdmin: (input: { password: string }) => Promise<void>;
   loginWithPassword: (input: {
-    email: string;
     password: string;
     totpCode?: string;
   }) => Promise<{ requiresTwoFactor: boolean }>;
@@ -154,7 +153,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [refreshSession]);
 
   const setupInitialAdmin = useCallback(
-    async (input: { email: string; displayName: string; password: string }) => {
+    async (input: { password: string }) => {
       setAuthError(null);
       await apiRequest('/auth/setup', {
         method: 'POST',
@@ -166,7 +165,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const loginWithPassword = useCallback(
-    async (input: { email: string; password: string; totpCode?: string }) => {
+    async (input: { password: string; totpCode?: string }) => {
       setAuthError(null);
       const res = await apiRequest<{ ok?: boolean; requiresTwoFactor?: boolean }>('/auth/login', {
         method: 'POST',

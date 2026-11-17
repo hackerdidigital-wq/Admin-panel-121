@@ -6,7 +6,7 @@
 - **Backend API**: Web-Standard Cloudflare Workers TypeScript router (`src/worker/index.ts`, `src/worker/app.ts`) serving both `/api/*` REST routes and static assets (`env.ASSETS`).
 - **Local Development Adapter**: `server.ts` mounts Vite middleware on port `3000` and forwards every `/api/*` request directly into `handleApiRequest()` backed by Node 22 `node:sqlite` (`src/db/local-d1.ts`, `.data/aegis.sqlite`). Local dev and Cloudflare Workers execute identical route, auth, RBAC, and SQLite logic.
 - **Database**: Cloudflare D1 SQLite managed via Drizzle ORM (`src/db/schema.ts`, 26 relational tables) and SQL migration (`migrations/0001_init.sql`).
-- **Authentication**: First-party administrator authentication with PBKDF2-SHA256 password hashing (100,000 iterations), `HttpOnly; SameSite=Lax` SHA-256 hashed sessions in `user_sessions`, account lockout after 5 failed attempts, optional RFC-6238 TOTP two-factor authentication, and zero hardcoded passwords or external paid identity providers.
+- **Authentication**: First-party password-only administrator authentication (zero Google/OAuth login, no email or username required) with PBKDF2-SHA256 password hashing (100,000 iterations), `HttpOnly; SameSite=Lax` SHA-256 hashed sessions in `user_sessions`, sliding-window rate limiting, optional RFC-6238 TOTP two-factor authentication, and zero hardcoded or randomly generated passwords.
 
 ## 2. Database Schema & Migrations (26 Tables)
 
@@ -26,10 +26,10 @@ npm run db:migrate:local
 ## 3. First-Time Super Admin Bootstrap & Authentication Lifecycle
 
 1. On startup or first `/api/auth/status` call, `ensureSystemSeeded()` populates system roles, permission definitions, baseline settings keys, and category/flag defaults (never creating dummy users or sample business metrics).
-2. When `users` count is `0`, `GET /api/auth/status` returns `{ needsSetup: true }`, and the UI displays **First-Time Super Admin Setup**.
-3. Submitting the setup form (`POST /api/auth/setup`) creates the `super_admin` user (with PBKDF2-SHA256 hash), opens an active session cookie, and permanently locks `/api/auth/setup` (`HTTP 409` thereafter).
-4. Subsequent logins use `POST /api/auth/login` (enforcing account status, 5-attempt 15-minute lockouts, and optional TOTP verification).
-5. Self-service password changes (`POST /api/auth/change-password`) and admin-initiated temporary password resets (`PATCH /api/users/:id`) are recorded in the tamper-evident audit chain.
+2. When no active administrator has a configured `password_hash`, `GET /api/auth/status` returns `{ needsSetup: true }`, and the UI displays **First-Time Installation: Create Administrator Password**.
+3. Submitting the setup form (`POST /api/auth/setup`) hashes the owner's chosen password with PBKDF2-SHA256, preserves any existing administrator record in-place (or creates the initial `super_admin` row), opens an active session cookie, and locks `/api/auth/setup` (`HTTP 409` thereafter).
+4. Subsequent logins use password-only `POST /api/auth/login` (requiring only the administrator password and optional TOTP verification, without locking the owner out).
+5. Self-service password changes (`POST /api/auth/change-password`) and admin-initiated password updates (`PATCH /api/users/:id`) are recorded in the tamper-evident audit chain.
 
 ## 4. Security Architecture
 
@@ -59,8 +59,8 @@ npm run db:migrate:local
 
 ## 7. GitHub CI/CD & Rollback Guide
 
-- **CI Pipeline (`.github/workflows/ci.yml`)**: Runs `npm ci`, verifies `migrations/0001_init.sql` creates all 26 SQLite tables cleanly in Node 22 `node:sqlite`, and runs `npm run lint`, `npm test`, and `npm run build`.
-- **Cloudflare Workers Deploy (`.github/workflows/deploy-cloudflare.yml`)**: Runs on `main` pushes, `v*` tags, and manual `workflow_dispatch`. When `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set, applies `wrangler d1 migrations apply aegis-enterprise-db --remote` and deploys via `wrangler deploy`.
+- **CI Pipeline (`.github/workflows/ci.yml`)**: Runs `npm ci` (cached against `package-lock.json`), verifies `migrations/0001_init.sql` creates all 26 SQLite tables + foreign keys + indexes in Node 22 `node:sqlite`, runs `npm run typecheck`, `npm run eslint`, `npm test`, `npm run build`, and validates the Worker bundle with `npx wrangler deploy --dry-run`.
+- **Cloudflare Workers Deploy (`.github/workflows/deploy-cloudflare.yml`)**: Runs the full `verify` job first, then (using `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and either `wrangler.toml` `database_id` or `CLOUDFLARE_D1_DATABASE_ID` secret) applies `wrangler d1 migrations apply aegis-enterprise-db --remote`, deploys via `wrangler deploy`, and verifies `/api/health` and `/api/auth/status` over HTTPS.
 - **Rollback**: Trigger `Deploy to Cloudflare Workers & D1 (Free Tier)` via **Actions -> workflow_dispatch** with an earlier tag (`v1.0.0`) or commit SHA in the `ref` input.
 
 ## 8. External Provider & Free-Tier Boundaries

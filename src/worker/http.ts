@@ -23,6 +23,48 @@ export function withSecurityHeaders(response: Response): Response {
   });
 }
 
+export function isAllowedCorsOrigin(request: Request, configuredAppUrl?: string): string | null {
+  const origin = request.headers.get('origin');
+  if (!origin) return null;
+  try {
+    const reqUrl = new URL(request.url);
+    const originUrl = new URL(origin);
+    if (originUrl.origin === reqUrl.origin) {
+      return originUrl.origin;
+    }
+    if (configuredAppUrl) {
+      const allowedUrl = new URL(configuredAppUrl);
+      if (originUrl.origin === allowedUrl.origin) {
+        return originUrl.origin;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function applyCorsHeaders(
+  request: Request,
+  response: Response,
+  configuredAppUrl?: string
+): Response {
+  const allowedOrigin = isAllowedCorsOrigin(request, configuredAppUrl);
+  const headers = new Headers(response.headers);
+  headers.set('Vary', 'Origin');
+  if (allowedOrigin) {
+    headers.set('Access-Control-Allow-Origin', allowedOrigin);
+    headers.set('Access-Control-Allow-Credentials', 'true');
+    headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export function jsonResponse(
   data: unknown,
   status = 200,

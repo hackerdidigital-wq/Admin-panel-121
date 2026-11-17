@@ -50,21 +50,53 @@ async function apiCall(
   return handleApiRequest(req, env);
 }
 
-test('D1 SQLite migration initializes all 26 relational tables', async () => {
+test('D1 SQLite migration initializes all 26 relational tables, foreign keys, and indexes', async () => {
   const { d1, raw } = createLocalD1Database(':memory:');
   try {
-    const res = await d1
+    const tables = await d1
       .prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
       )
       .all<{ name: string }>();
-    assert.equal(res.results.length, 26);
+    assert.equal(tables.results.length, 26);
+
+    const indexes = await d1
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'"
+      )
+      .all<{ name: string }>();
+    assert.ok(indexes.results.length >= 15);
+
+    const fkCheck = raw.prepare('PRAGMA foreign_key_check').all();
+    assert.equal(fkCheck.length, 0);
   } finally {
     raw.close();
   }
 });
 
-test('Full Worker Auth Lifecycle: Setup -> Session -> Logout -> Login -> Lockout -> CSRF & Unauthenticated 401', async () => {
+test('Worker enforces strict same-origin CORS preflight and security headers', async () => {
+  const { env, close } = createTestEnv();
+  try {
+    const sameOriginPreflight = await apiCall(env, 'OPTIONS', '/api/health', {
+      headers: { origin: 'http://localhost:3000' },
+    });
+    assert.equal(sameOriginPreflight.status, 204);
+    assert.equal(sameOriginPreflight.headers.get('access-control-allow-origin'), 'http://localhost:3000');
+    assert.equal(sameOriginPreflight.headers.get('access-control-allow-credentials'), 'true');
+    assert.equal(sameOriginPreflight.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(sameOriginPreflight.headers.get('x-frame-options'), 'SAMEORIGIN');
+
+    const evilPreflight = await apiCall(env, 'OPTIONS', '/api/health', {
+      headers: { origin: 'https://evil.example' },
+    });
+    assert.equal(evilPreflight.status, 403);
+    assert.equal(evilPreflight.headers.get('access-control-allow-origin'), null);
+  } finally {
+    close();
+  }
+});
+
+test('Full Worker Password-Only Auth Lifecycle: Setup -> Session -> Logout -> Login -> No Lockout -> CSRF & Unauthenticated 401', async () => {
   const { env, close } = createTestEnv();
   try {
     // 1. Health & initial setup status
@@ -86,14 +118,14 @@ test('Full Worker Auth Lifecycle: Setup -> Session -> Logout -> Login -> Lockout
 
     // 3. Cross-origin mutation rejected with 403
     const csrfRes = await apiCall(env, 'POST', '/api/auth/setup', {
-      body: { email: 'root@aegis.local', displayName: 'Root', password: 'SuperPassword#2026' },
+      body: { password: 'SuperPassword#2026' },
       headers: { origin: 'https://evil.example' },
     });
     assert.equal(csrfRes.status, 403);
 
-    // 4. First-Time Super Admin Setup succeeds & issues HttpOnly cookie
+    // 4. First-Time Password-Only Setup succeeds (no email/username) & issues HttpOnly cookie
     const setupRes = await apiCall(env, 'POST', '/api/auth/setup', {
-      body: { email: 'root@aegis.local', displayName: 'Root Admin', password: 'SuperPassword#2026' },
+      body: { password: 'SuperPassword#2026' },
     });
     assert.equal(setupRes.status, 201);
     const setCookieHeader = setupRes.headers.get('set-cookie') || '';
@@ -103,16 +135,15 @@ test('Full Worker Auth Lifecycle: Setup -> Session -> Logout -> Login -> Lockout
 
     // 5. Second setup attempt is locked (409)
     const secondSetup = await apiCall(env, 'POST', '/api/auth/setup', {
-      body: { email: 'attacker@aegis.local', displayName: 'Attacker', password: 'SuperPassword#2026' },
+      body: { password: 'AnotherPassword#2026' },
     });
     assert.equal(secondSetup.status, 409);
 
     // 6. Session profile returns super_admin & real dashboard stats (no fake data)
     const sessRes = await apiCall(env, 'GET', '/api/auth/session', { cookie: adminCookie });
     assert.equal(sessRes.status, 200);
-    const sessBody = (await sessRes.json()) as { user: { roleSlug: string; email: string } };
+    const sessBody = (await sessRes.json()) as { user: { roleSlug: string } };
     assert.equal(sessBody.user.roleSlug, 'super_admin');
-    assert.equal(sessBody.user.email, 'root@aegis.local');
 
     const dashRes = await apiCall(env, 'GET', '/api/dashboard/overview', { cookie: adminCookie });
     assert.equal(dashRes.status, 200);
@@ -126,17 +157,61 @@ test('Full Worker Auth Lifecycle: Setup -> Session -> Logout -> Login -> Lockout
     const afterLogoutSess = await apiCall(env, 'GET', '/api/auth/session', { cookie: adminCookie });
     assert.equal(afterLogoutSess.status, 401);
 
-    // 8. 5 failed password attempts lock account (423 on 6th)
+    // 8. Wrong password attempts return 401 without locking the administrator out
     for (let i = 0; i < 5; i++) {
       const failLogin = await apiCall(env, 'POST', '/api/auth/login', {
-        body: { email: 'root@aegis.local', password: 'WrongPassword#999' },
+        body: { password: 'WrongPassword#999' },
       });
       assert.equal(failLogin.status, 401);
     }
-    const lockedLogin = await apiCall(env, 'POST', '/api/auth/login', {
-      body: { email: 'root@aegis.local', password: 'SuperPassword#2026' },
+
+    // 9. Password-only login succeeds immediately after wrong attempts (no email required)
+    const validLogin = await apiCall(env, 'POST', '/api/auth/login', {
+      body: { password: 'SuperPassword#2026' },
     });
-    assert.equal(lockedLogin.status, 423);
+    assert.equal(validLogin.status, 200);
+    const reloginCookie = extractCookieValue(validLogin);
+    assert.ok(reloginCookie.startsWith('aegis_session='));
+  } finally {
+    close();
+  }
+});
+
+test('Password-only setup preserves existing admin record and avoids lockout', async () => {
+  const { env, close } = createTestEnv();
+  try {
+    // Seed an existing admin row without passwordHash (simulating legacy/OAuth migration)
+    await env.DB.prepare(
+      "INSERT INTO users (uid, email, display_name, status, is_admin, locked_until, failed_login_attempts) VALUES ('adm_legacy', 'legacy-admin@aegis.local', 'Legacy Owner', 'active', 1, 9999999999999, 5)"
+    ).run();
+
+    const statusRes = await apiCall(env, 'GET', '/api/auth/status');
+    assert.equal(statusRes.status, 200);
+    const statusBody = (await statusRes.json()) as { needsSetup: boolean };
+    assert.equal(statusBody.needsSetup, true);
+
+    const setupRes = await apiCall(env, 'POST', '/api/auth/setup', {
+      body: { password: 'OwnerChosen#Password1' },
+    });
+    assert.equal(setupRes.status, 201);
+
+    // Existing row preserved in-place instead of wiped or duplicated
+    const rows = await env.DB.prepare('SELECT id, email, display_name, locked_until FROM users').all<{
+      id: number;
+      email: string;
+      display_name: string;
+      locked_until: number | null;
+    }>();
+    assert.equal(rows.results.length, 1);
+    assert.equal(rows.results[0].email, 'legacy-admin@aegis.local');
+    assert.equal(rows.results[0].display_name, 'Legacy Owner');
+    assert.equal(rows.results[0].locked_until, null);
+
+    // Direct password-only login works
+    const loginRes = await apiCall(env, 'POST', '/api/auth/login', {
+      body: { password: 'OwnerChosen#Password1' },
+    });
+    assert.equal(loginRes.status, 200);
   } finally {
     close();
   }
@@ -145,9 +220,9 @@ test('Full Worker Auth Lifecycle: Setup -> Session -> Logout -> Login -> Lockout
 test('Worker API RBAC enforcement, Backup SHA-256 verification, and Audit Hash Chain integrity', async () => {
   const { env, close } = createTestEnv();
   try {
-    // Bootstrap Super Admin
+    // Bootstrap Super Admin with password only
     const setupRes = await apiCall(env, 'POST', '/api/auth/setup', {
-      body: { email: 'super@aegis.local', displayName: 'Super Admin', password: 'SuperPassword#2026' },
+      body: { password: 'SuperPassword#2026' },
     });
     assert.equal(setupRes.status, 201);
     const superCookie = extractCookieValue(setupRes);
@@ -191,9 +266,9 @@ test('Worker API RBAC enforcement, Backup SHA-256 verification, and Audit Hash C
     const verifyBody = (await backupVerifyRes.json()) as { valid: boolean };
     assert.equal(verifyBody.valid, true);
 
-    // Login as support_agent
+    // Login as support_agent with password
     const agentLoginRes = await apiCall(env, 'POST', '/api/auth/login', {
-      body: { email: 'agent@aegis.local', password: 'AgentPassword#2026' },
+      body: { password: 'AgentPassword#2026' },
     });
     assert.equal(agentLoginRes.status, 200);
     const agentCookie = extractCookieValue(agentLoginRes);

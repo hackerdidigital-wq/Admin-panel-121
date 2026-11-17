@@ -49,7 +49,7 @@ export const SettingsPage: React.FC<{ subview: string }> = ({ subview }) => {
 
   const saveSetting = async (key: string, cat: string) => {
     const raw = draftValues[key] ?? '';
-    let parsed: unknown = raw;
+    let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {

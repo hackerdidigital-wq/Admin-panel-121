@@ -12,7 +12,7 @@ A zero-cost (`₹0`), production-oriented enterprise administration platform run
   - **Notifications Center**: In-app persisted notifications, reusable templates, scheduled queues, and honest provider reporting (`EMAIL_PROVIDER_URL` / `PUSH_PROVIDER_URL` show explicit unconfigured status when unset rather than faking delivery).
   - **Financial & Advertisement Management**: Transaction ledger, refunds, fraud alerts, payout tracking, and configurable ad network/placement rules.
   - **Application Management & Support**: Feature flags, maintenance mode, minimum supported version enforcement, release changelog, support ticket queue, threaded replies, and response templates.
-  - **Analytics, Security & Audit**: Interactive SVG analytics, PBKDF2-SHA256 password hashing (100k iterations), `HttpOnly` session cookies, 5-attempt account lockout, RFC-6238 TOTP two-factor authentication, IP allowlists, sliding-window rate limiting, CSRF origin protection, SHA-256 hash-chained audit logs with chain integrity verification, and optional Gemini security analysis (`GEMINI_API_KEY`).
+  - **Analytics, Security & Audit**: Interactive SVG analytics, password-only administrator login with PBKDF2-SHA256 password hashing (100k iterations), `HttpOnly` session cookies, sliding-window rate limiting, RFC-6238 TOTP two-factor authentication, IP allowlists, CSRF origin protection, SHA-256 hash-chained audit logs with chain integrity verification, and optional Gemini security analysis (`GEMINI_API_KEY`).
   - **System, GitHub, Database & Files**: Live Worker/D1 health probes, maintenance jobs, GitHub REST API repository/PR/workflow/deployment inspection, D1 SQLite table/record inspector (26 tables), verified JSON logical backups with SHA-256 checksums, D1 inline file storage (750 KB free-tier asset limit), and workspace preferences.
 
 ## Quickstart (Local Zero-Cost Mode)
@@ -33,7 +33,7 @@ A zero-cost (`₹0`), production-oriented enterprise administration platform run
    ```bash
    npm run dev
    ```
-   Open `http://localhost:3000`. On an empty `users` table, the console opens the **First-Time Super Admin Setup** workflow so you can create the initial `super_admin` account directly.
+   Open `http://localhost:3000`. During first-time installation, the console prompts you to create your own administrator password (no email, username, Google OAuth, or default password is used). After setup, sign in directly using only your created password.
 
 ## Free-Tier Cloudflare Workers & D1 Deployment
 

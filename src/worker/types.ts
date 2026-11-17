@@ -36,6 +36,7 @@ export interface WorkerEnv {
   GEMINI_API_KEY?: string;
   EMAIL_PROVIDER_URL?: string;
   PUSH_PROVIDER_URL?: string;
+  APP_URL?: string;
   APP_ENV?: string;
 }
 

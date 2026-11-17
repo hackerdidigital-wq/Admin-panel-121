@@ -3,6 +3,8 @@ import {
   AlertCircle,
   ArrowRight,
   Database,
+  Eye,
+  EyeOff,
   KeyRound,
   Lock,
   Moon,
@@ -11,7 +13,6 @@ import {
   Sun,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { apiRequest } from '../lib/api';
 
 export const LoginPage: React.FC = () => {
   const {
@@ -30,18 +31,13 @@ export const LoginPage: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // First-Time Setup / Login fields
-  const [email, setEmail] = useState('');
-  const [displayName, setDisplayName] = useState('');
+  // Password-only authentication state
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [totpCode, setTotpCode] = useState('');
   const [requiresTwoFactor, setRequiresTwoFactor] = useState(false);
-
-  // Forgot Password state
-  const [forgotOpen, setForgotOpen] = useState(false);
-  const [forgotEmail, setForgotEmail] = useState('');
-  const [forgotMessage, setForgotMessage] = useState<string | null>(null);
 
   const checkHealth = () => {
     fetch('/api/health')
@@ -63,9 +59,11 @@ export const LoginPage: React.FC = () => {
     }
     setSubmitting(true);
     try {
-      await setupInitialAdmin({ email, displayName, password });
+      await setupInitialAdmin({ password });
+      setPassword('');
+      setConfirmPassword('');
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Initial Super Admin setup failed.');
+      setFormError(err instanceof Error ? err.message : 'Initial administrator setup failed.');
     } finally {
       setSubmitting(false);
     }
@@ -77,33 +75,19 @@ export const LoginPage: React.FC = () => {
     setSubmitting(true);
     try {
       const res = await loginWithPassword({
-        email,
         password,
         totpCode: requiresTwoFactor ? totpCode : undefined,
       });
       if (res.requiresTwoFactor) {
         setRequiresTwoFactor(true);
+      } else {
+        setPassword('');
+        setTotpCode('');
       }
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Authentication failed.');
     } finally {
       setSubmitting(false);
-    }
-  };
-
-  const handleForgotSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setForgotMessage(null);
-    try {
-      const res = await apiRequest<{ message: string }>('/auth/forgot-password', {
-        method: 'POST',
-        body: JSON.stringify({ email: forgotEmail || email }),
-      });
-      setForgotMessage(res.message);
-    } catch (err) {
-      setForgotMessage(
-        err instanceof Error ? err.message : 'Unable to submit password reset request.'
-      );
     }
   };
 
@@ -133,7 +117,7 @@ export const LoginPage: React.FC = () => {
 
       <main className="mx-auto flex w-full max-w-5xl flex-1 items-center px-4 py-5 sm:px-6 lg:py-10">
         <div className="grid w-full items-stretch gap-6 lg:grid-cols-12 lg:gap-8">
-          {/* Primary Auth / Bootstrap Card — Always first above the fold on mobile */}
+          {/* Primary Password-Only Auth Card — Always first above the fold on mobile */}
           <section className="order-first flex flex-col justify-center rounded-xl border border-slate-200 bg-white p-6 sm:p-8 lg:order-last lg:col-span-5 dark:border-slate-800 dark:bg-slate-900">
             {needsSetup ? (
               <>
@@ -142,11 +126,11 @@ export const LoginPage: React.FC = () => {
                   <span>First-Time Installation</span>
                 </div>
                 <h2 className="mt-2 font-display text-lg font-semibold text-slate-900 dark:text-slate-100">
-                  Create Super Admin Account
+                  Create Administrator Password
                 </h2>
                 <p className="mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                  No users exist in the D1 database yet. Provision the initial Super Admin
-                  account; setup locks permanently once created.
+                  Create your own administrator password to secure this console. No email or
+                  username is required, and no default or random password is ever generated.
                 </p>
 
                 {combinedError && (
@@ -161,82 +145,94 @@ export const LoginPage: React.FC = () => {
 
                 <form onSubmit={handleSetupSubmit} className="mt-5 space-y-3.5">
                   <div>
-                    <label htmlFor="setup-name" className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                      Full Name
+                    <label
+                      htmlFor="setup-password"
+                      className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                    >
+                      Administrator Password
                     </label>
-                    <input
-                      id="setup-name"
-                      type="text"
-                      required
-                      value={displayName}
-                      onChange={(e) => setDisplayName(e.target.value)}
-                      placeholder="Jane Doe"
-                      className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
-                    />
+                    <div className="relative mt-1">
+                      <input
+                        id="setup-password"
+                        type={showPassword ? 'text' : 'password'}
+                        required
+                        autoComplete="new-password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="12+ chars, upper, lower, number, symbol"
+                        className="h-10 w-full rounded-lg border border-slate-200 bg-white pl-3 pr-10 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((v) => !v)}
+                        aria-label={showPassword ? 'Hide password' : 'Show password'}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                      >
+                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
                   </div>
+
                   <div>
-                    <label htmlFor="setup-email" className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                      Administrator Email
-                    </label>
-                    <input
-                      id="setup-email"
-                      type="email"
-                      required
-                      autoComplete="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="admin@company.com"
-                      className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="setup-password" className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                      Password
-                    </label>
-                    <input
-                      id="setup-password"
-                      type="password"
-                      required
-                      autoComplete="new-password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="12+ chars, upper, lower, number, symbol"
-                      className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="setup-confirm" className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    <label
+                      htmlFor="setup-confirm"
+                      className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                    >
                       Confirm Password
                     </label>
-                    <input
-                      id="setup-confirm"
-                      type="password"
-                      required
-                      autoComplete="new-password"
-                      value={confirmPassword}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
-                      className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
-                    />
+                    <div className="relative mt-1">
+                      <input
+                        id="setup-confirm"
+                        type={showConfirmPassword ? 'text' : 'password'}
+                        required
+                        autoComplete="new-password"
+                        value={confirmPassword}
+                        onChange={(e) => setConfirmPassword(e.target.value)}
+                        placeholder="Re-enter your password"
+                        className="h-10 w-full rounded-lg border border-slate-200 bg-white pl-3 pr-10 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowConfirmPassword((v) => !v)}
+                        aria-label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                      >
+                        {showConfirmPassword ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
                   </div>
+
+                  <p className="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                    Minimum 12 characters including uppercase, lowercase, a number, and a symbol.
+                    Stored using PBKDF2-SHA256 (100,000 iterations).
+                  </p>
 
                   <button
                     type="submit"
                     disabled={submitting}
                     className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
                   >
-                    <span>{submitting ? 'Provisioning Super Admin...' : 'Initialize Super Admin'}</span>
+                    <span>{submitting ? 'Saving Password...' : 'Set Password & Enter Console'}</span>
                     <ArrowRight className="h-4 w-4" />
                   </button>
                 </form>
               </>
             ) : (
               <>
-                <h2 className="font-display text-lg font-semibold text-slate-900 dark:text-slate-100">
+                <div className="flex items-center gap-2 text-xs font-semibold text-blue-600 dark:text-blue-400">
+                  <Lock className="h-4 w-4" />
+                  <span>Password Authentication</span>
+                </div>
+                <h2 className="mt-2 font-display text-lg font-semibold text-slate-900 dark:text-slate-100">
                   Administrator Sign-In
                 </h2>
                 <p className="mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                  Authenticate with your administrator email and password. Sessions use HttpOnly
-                  cookies protected by PBKDF2-SHA256 and server-side RBAC.
+                  Enter your administrator password to unlock the console. No email or username is
+                  required.
                 </p>
 
                 {combinedError && (
@@ -266,50 +262,40 @@ export const LoginPage: React.FC = () => {
 
                 <form onSubmit={handleLoginSubmit} className="mt-5 space-y-3.5">
                   <div>
-                    <label htmlFor="login-email" className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                      Email Address
+                    <label
+                      htmlFor="login-password"
+                      className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                    >
+                      Administrator Password
                     </label>
-                    <input
-                      id="login-email"
-                      type="email"
-                      required
-                      autoComplete="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="admin@company.com"
-                      className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
-                    />
-                  </div>
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <label htmlFor="login-password" className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                        Password
-                      </label>
+                    <div className="relative mt-1">
+                      <input
+                        id="login-password"
+                        type={showPassword ? 'text' : 'password'}
+                        required
+                        autoComplete="current-password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="Enter your administrator password"
+                        className="h-10 w-full rounded-lg border border-slate-200 bg-white pl-3 pr-10 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
+                      />
                       <button
                         type="button"
-                        onClick={() => {
-                          setForgotOpen((v) => !v);
-                          setForgotMessage(null);
-                        }}
-                        className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                        onClick={() => setShowPassword((v) => !v)}
+                        aria-label={showPassword ? 'Hide password' : 'Show password'}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
                       >
-                        Forgot password?
+                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                       </button>
                     </div>
-                    <input
-                      id="login-password"
-                      type="password"
-                      required
-                      autoComplete="current-password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
-                    />
                   </div>
 
                   {requiresTwoFactor && (
                     <div>
-                      <label htmlFor="login-totp" className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                      <label
+                        htmlFor="login-totp"
+                        className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                      >
                         Two-Factor TOTP Code
                       </label>
                       <input
@@ -335,44 +321,12 @@ export const LoginPage: React.FC = () => {
                     <ArrowRight className="h-4 w-4" />
                   </button>
                 </form>
-
-                {forgotOpen && (
-                  <form
-                    onSubmit={handleForgotSubmit}
-                    className="mt-4 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-950"
-                  >
-                    <p className="text-xs font-semibold text-slate-800 dark:text-slate-200">
-                      Password Reset Request
-                    </p>
-                    <div className="flex gap-2">
-                      <input
-                        type="email"
-                        required
-                        value={forgotEmail || email}
-                        onChange={(e) => setForgotEmail(e.target.value)}
-                        placeholder="Enter administrator email"
-                        className="h-9 flex-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs dark:border-slate-700 dark:bg-slate-900"
-                      />
-                      <button
-                        type="submit"
-                        className="h-9 rounded-md border border-slate-300 bg-white px-3 text-xs font-medium hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800"
-                      >
-                        Request
-                      </button>
-                    </div>
-                    {forgotMessage && (
-                      <p className="text-[11px] leading-relaxed text-slate-600 dark:text-slate-400">
-                        {forgotMessage}
-                      </p>
-                    )}
-                  </form>
-                )}
               </>
             )}
 
             <p className="mt-4 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
-              Protected by HttpOnly session cookies, login rate limiting, CSRF origin checks,
-              and hash-chained audit logs.
+              Protected by HttpOnly session cookies, sliding-window rate limiting, CSRF origin
+              checks, and hash-chained audit logs.
             </p>
           </section>
 
@@ -398,7 +352,8 @@ export const LoginPage: React.FC = () => {
                     <span>Zero Hardcoded Credentials</span>
                   </div>
                   <p className="mt-1.5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                    PBKDF2-SHA256 passwords, HttpOnly session cookies, brute-force lockout, and optional RFC 6238 TOTP 2FA.
+                    Password-only PBKDF2-SHA256 authentication, HttpOnly session cookies, no
+                    third-party OAuth required, and optional RFC 6238 TOTP 2FA.
                   </p>
                 </div>
                 <div className="rounded-lg border border-slate-200 p-4 dark:border-slate-800">
@@ -407,7 +362,8 @@ export const LoginPage: React.FC = () => {
                     <span>Cloudflare D1 &amp; Hash-Chained Audit</span>
                   </div>
                   <p className="mt-1.5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                    26 relational SQLite tables with SHA-256 hash-chained audit logs and verifiable logical backups.
+                    26 relational SQLite tables with SHA-256 hash-chained audit logs and verifiable
+                    logical backups.
                   </p>
                 </div>
               </div>

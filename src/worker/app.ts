@@ -3,8 +3,10 @@ import { createDb } from '../db/index.ts';
 import { apiLogs, systemSettings } from '../db/schema.ts';
 import { SlidingWindowLimiter } from '../lib/security.ts';
 import {
+  applyCorsHeaders,
   errorResponse,
   getClientIp,
+  isAllowedCorsOrigin,
   verifyCsrfOrigin,
   withSecurityHeaders,
 } from './http.ts';
@@ -40,10 +42,21 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
   const userAgent = request.headers.get('user-agent') || '';
   const db = createDb(env.DB);
 
+  // Strict CORS preflight handling
+  if (request.method.toUpperCase() === 'OPTIONS') {
+    const allowedOrigin = isAllowedCorsOrigin(request, env.APP_URL);
+    if (request.headers.get('origin') && !allowedOrigin) {
+      return withSecurityHeaders(errorResponse(403, 'Forbidden: Disallowed CORS origin.'));
+    }
+    return withSecurityHeaders(
+      applyCorsHeaders(request, new Response(null, { status: 204 }), env.APP_URL)
+    );
+  }
+
   // CSRF check on mutating requests
   const csrfFail = verifyCsrfOrigin(request);
   if (csrfFail) {
-    return withSecurityHeaders(csrfFail);
+    return withSecurityHeaders(applyCorsHeaders(request, csrfFail, env.APP_URL));
   }
 
   // Sliding-window rate limit backed by DB setting
@@ -75,13 +88,19 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     headers.set('X-RateLimit-Limit', String(configuredLimitPerMin));
     headers.set('X-RateLimit-Remaining', '0');
     return withSecurityHeaders(
-      new Response(resp.body, { status: resp.status, headers })
+      applyCorsHeaders(
+        request,
+        new Response(resp.body, { status: resp.status, headers }),
+        env.APP_URL
+      )
     );
   }
 
   const matched = router.match(request.method, url.pathname);
   if (!matched) {
-    return withSecurityHeaders(errorResponse(404, 'API endpoint not found.'));
+    return withSecurityHeaders(
+      applyCorsHeaders(request, errorResponse(404, 'API endpoint not found.'), env.APP_URL)
+    );
   }
 
   const ctx: WorkerContext = {
@@ -126,10 +145,14 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
   headers.set('X-RateLimit-Remaining', String(rateResult.remaining));
 
   return withSecurityHeaders(
-    new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers,
-    })
+    applyCorsHeaders(
+      request,
+      new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      }),
+      env.APP_URL
+    )
   );
 }

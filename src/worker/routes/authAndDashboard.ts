@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNotNull, sql } from 'drizzle-orm';
 import {
   apiLogs,
   auditLogs,
@@ -41,7 +41,7 @@ import {
 import type { WorkerRouter } from '../router.ts';
 import type { WorkerContext } from '../types.ts';
 
-const loginLimiter = new SlidingWindowLimiter(10, 5 * 60_000); // 10 login attempts per 5 min per IP
+const loginLimiter = new SlidingWindowLimiter(20, 5 * 60_000); // 20 login attempts per 5 min per IP
 
 function toDayKey(dateVal: Date | number | null | undefined): string {
   if (!dateVal) return '';
@@ -77,18 +77,20 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
   router.get('/api/auth/status', async (ctx: WorkerContext) => {
     try {
       await ensureSystemSeeded(ctx.db, ctx.env.GITHUB_DEFAULT_REPO || '');
-      const countRows = await ctx.db
+      const configuredRows = await ctx.db
         .select({ count: sql<number>`cast(count(*) as integer)` })
-        .from(users);
-      const userCount = Number(countRows[0]?.count ?? 0);
+        .from(users)
+        .where(and(isNotNull(users.passwordHash), eq(users.status, 'active')));
+      const configuredCount = Number(configuredRows[0]?.count ?? 0);
 
       let authenticated = false;
       const rawToken = extractSessionToken(ctx.request);
-      if (rawToken && userCount > 0) {
+      if (rawToken && configuredCount > 0) {
         const tokenHash = await computeSha256(rawToken);
         const sessRows = await ctx.db
           .select({
             id: userSessions.id,
+            userId: userSessions.userId,
             isActive: userSessions.isActive,
             revokedAt: userSessions.revokedAt,
             expiresAt: userSessions.expiresAt,
@@ -103,7 +105,14 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
           !sess.revokedAt &&
           new Date(sess.expiresAt).getTime() > Date.now()
         ) {
-          authenticated = true;
+          const userRows = await ctx.db
+            .select({ status: users.status })
+            .from(users)
+            .where(eq(users.id, sess.userId))
+            .limit(1);
+          if (userRows[0]?.status === 'active') {
+            authenticated = true;
+          }
         }
       }
 
@@ -116,7 +125,7 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
 
       return jsonResponse({
         authenticated,
-        needsSetup: userCount === 0,
+        needsSetup: configuredCount === 0,
         databaseReady: true,
         emailProviderConfigured: Boolean(ctx.env.EMAIL_PROVIDER_URL || emailCfg?.configured),
       });
@@ -125,17 +134,18 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
     }
   });
 
-  // First-Time Super Admin Setup (strictly locked once users > 0)
+  // First-Time Administrator Password Setup (locked once an active admin password exists)
   router.post('/api/auth/setup', async (ctx: WorkerContext) => {
     await ensureSystemSeeded(ctx.db, ctx.env.GITHUB_DEFAULT_REPO || '');
 
-    const countRows = await ctx.db
+    const configuredRows = await ctx.db
       .select({ count: sql<number>`cast(count(*) as integer)` })
-      .from(users);
-    if (Number(countRows[0]?.count ?? 0) > 0) {
+      .from(users)
+      .where(and(isNotNull(users.passwordHash), eq(users.status, 'active')));
+    if (Number(configuredRows[0]?.count ?? 0) > 0) {
       return errorResponse(
         409,
-        'Initial administrator setup is locked because an administrator account already exists.'
+        'Initial administrator setup is locked because an administrator password has already been configured.'
       );
     }
 
@@ -145,14 +155,7 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
       password?: string;
     }>(ctx.request);
 
-    const email = sanitizeText(body.email, 160).toLowerCase();
-    const displayName = sanitizeText(body.displayName, 120) || 'Super Administrator';
     const password = typeof body.password === 'string' ? body.password : '';
-
-    if (!isValidEmail(email)) {
-      return errorResponse(400, 'Please enter a valid administrator email address.');
-    }
-
     const policyCheck = validatePasswordStrength(password);
     if (!policyCheck.valid) {
       return errorResponse(400, policyCheck.errors[0]);
@@ -167,25 +170,58 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
 
     const passwordHash = await hashPassword(password);
     const now = new Date();
-    const inserted = await ctx.db
-      .insert(users)
-      .values({
-        uid: generateUid('adm'),
-        email,
-        passwordHash,
-        passwordUpdatedAt: now,
-        displayName,
-        roleId: superAdminRole?.id ?? null,
-        status: 'active',
-        isAdmin: true,
-        emailVerified: true,
-        lastSeenAt: now,
-        lastLoginAt: now,
-        lastIp: ctx.clientIp,
-      })
-      .returning();
 
-    const admin = inserted[0];
+    // Preserve existing administrator records if any exist without a passwordHash
+    const existingRows = await ctx.db
+      .select()
+      .from(users)
+      .orderBy(desc(users.isAdmin), asc(users.id))
+      .limit(1);
+
+    let admin: typeof users.$inferSelect;
+    if (existingRows[0]) {
+      const updated = await ctx.db
+        .update(users)
+        .set({
+          passwordHash,
+          passwordUpdatedAt: now,
+          roleId: existingRows[0].roleId ?? superAdminRole?.id ?? null,
+          status: 'active',
+          isAdmin: true,
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+          lastSeenAt: now,
+          lastLoginAt: now,
+          lastIp: ctx.clientIp,
+          updatedAt: now,
+        })
+        .where(eq(users.id, existingRows[0].id))
+        .returning();
+      admin = updated[0];
+    } else {
+      const requestedEmail = sanitizeText(body.email, 160).toLowerCase();
+      const internalEmail = isValidEmail(requestedEmail) ? requestedEmail : 'admin@aegis.local';
+      const displayName = sanitizeText(body.displayName, 120) || 'Administrator';
+      const inserted = await ctx.db
+        .insert(users)
+        .values({
+          uid: generateUid('adm'),
+          email: internalEmail,
+          passwordHash,
+          passwordUpdatedAt: now,
+          displayName,
+          roleId: superAdminRole?.id ?? null,
+          status: 'active',
+          isAdmin: true,
+          emailVerified: true,
+          lastSeenAt: now,
+          lastLoginAt: now,
+          lastIp: ctx.clientIp,
+        })
+        .returning();
+      admin = inserted[0];
+    }
+
     const { rawToken } = await createUserSession(ctx.db, admin.id, ctx.clientIp, ctx.userAgent, 480);
 
     await writeAuditLog(ctx.db, {
@@ -195,20 +231,20 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
       module: 'auth',
       targetType: 'user',
       targetId: admin.id,
-      details: { roleSlug: 'super_admin' },
+      details: { roleSlug: 'super_admin', authMode: 'password_only' },
       ipAddress: ctx.clientIp,
       userAgent: ctx.userAgent,
     });
 
     const secure = isHttpsRequest(ctx.request);
     return jsonResponse(
-      { ok: true, userId: admin.id, email: admin.email },
+      { ok: true, userId: admin.id },
       201,
       { 'Set-Cookie': buildSessionCookieHeader(rawToken, 480 * 60, secure) }
     );
   });
 
-  // Email & Password Sign-In (+ optional TOTP 2FA verification)
+  // Password-Only Administrator Sign-In (+ optional TOTP 2FA verification)
   router.post('/api/auth/login', async (ctx: WorkerContext) => {
     await ensureSystemSeeded(ctx.db, ctx.env.GITHUB_DEFAULT_REPO || '');
 
@@ -225,85 +261,67 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
       totpCode?: string;
     }>(ctx.request);
 
-    const email = sanitizeText(body.email, 160).toLowerCase();
+    const optionalEmail = sanitizeText(body.email, 160).toLowerCase();
     const password = typeof body.password === 'string' ? body.password : '';
     const totpCode = sanitizeText(body.totpCode, 16);
 
-    if (!isValidEmail(email) || !password) {
-      return errorResponse(400, 'Email and password are required.');
+    if (!password) {
+      return errorResponse(400, 'Administrator password is required.');
     }
 
-    const userRows = await ctx.db.select().from(users).where(eq(users.email, email)).limit(1);
-    const userRow = userRows[0];
+    const candidates = optionalEmail
+      ? await ctx.db
+          .select()
+          .from(users)
+          .where(and(eq(users.email, optionalEmail), isNotNull(users.passwordHash)))
+          .limit(1)
+      : await ctx.db
+          .select()
+          .from(users)
+          .where(isNotNull(users.passwordHash))
+          .orderBy(desc(users.isAdmin), asc(users.id))
+          .limit(25);
 
-    if (!userRow || !userRow.passwordHash) {
+    let matchedUser: typeof users.$inferSelect | null = null;
+    for (const candidate of candidates) {
+      if (await verifyPassword(password, candidate.passwordHash)) {
+        matchedUser = candidate;
+        break;
+      }
+    }
+
+    if (!matchedUser) {
       await writeAuditLog(ctx.db, {
-        actorEmail: email,
+        actorEmail: optionalEmail || 'administrator',
         action: 'auth.login_failed',
         module: 'security',
-        details: { reason: 'invalid_credentials' },
+        details: { reason: 'invalid_password' },
         status: 'failure',
         ipAddress: ctx.clientIp,
         userAgent: ctx.userAgent,
       });
-      return errorResponse(401, 'Invalid email or password.');
-    }
-
-    if (userRow.lockedUntil && new Date(userRow.lockedUntil).getTime() > Date.now()) {
-      return errorResponse(423, 'Account temporarily locked due to repeated failed login attempts.');
+      return errorResponse(401, 'Invalid administrator password.');
     }
 
     if (
-      userRow.status === 'suspended' ||
-      userRow.status === 'banned' ||
-      userRow.status === 'deleted' ||
-      userRow.status === 'inactive'
+      matchedUser.status === 'suspended' ||
+      matchedUser.status === 'banned' ||
+      matchedUser.status === 'deleted' ||
+      matchedUser.status === 'inactive'
     ) {
-      return errorResponse(403, `Account access blocked (${userRow.status}).`);
-    }
-
-    const passwordValid = await verifyPassword(password, userRow.passwordHash);
-    if (!passwordValid) {
-      const nextAttempts = (userRow.failedLoginAttempts ?? 0) + 1;
-      const lockedUntil = nextAttempts >= 5 ? new Date(Date.now() + 15 * 60_000) : null;
-      await ctx.db
-        .update(users)
-        .set({
-          failedLoginAttempts: nextAttempts,
-          lockedUntil,
-          updatedAt: new Date(),
-        })
-        .where(eq(users.id, userRow.id));
-
-      await writeAuditLog(ctx.db, {
-        actorId: userRow.id,
-        actorEmail: userRow.email,
-        action: 'auth.login_failed',
-        module: 'security',
-        details: { attempts: nextAttempts, locked: Boolean(lockedUntil) },
-        status: 'failure',
-        ipAddress: ctx.clientIp,
-        userAgent: ctx.userAgent,
-      });
-
-      return errorResponse(
-        401,
-        lockedUntil
-          ? 'Too many failed attempts. Account locked for 15 minutes.'
-          : 'Invalid email or password.'
-      );
+      return errorResponse(403, `Account access blocked (${matchedUser.status}).`);
     }
 
     // Optional TOTP 2FA verification when enabled
-    if (userRow.twoFactorEnabled && userRow.twoFactorSecret) {
+    if (matchedUser.twoFactorEnabled && matchedUser.twoFactorSecret) {
       if (!totpCode) {
         return jsonResponse({ requiresTwoFactor: true });
       }
-      const validTotp = await verifyTotpToken(userRow.twoFactorSecret, totpCode);
+      const validTotp = await verifyTotpToken(matchedUser.twoFactorSecret, totpCode);
       if (!validTotp) {
         await writeAuditLog(ctx.db, {
-          actorId: userRow.id,
-          actorEmail: userRow.email,
+          actorId: matchedUser.id,
+          actorEmail: matchedUser.email,
           action: 'auth.2fa_failed',
           module: 'security',
           status: 'failure',
@@ -333,23 +351,23 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
         lastIp: ctx.clientIp,
         updatedAt: now,
       })
-      .where(eq(users.id, userRow.id));
+      .where(eq(users.id, matchedUser.id));
 
     const { rawToken } = await createUserSession(
       ctx.db,
-      userRow.id,
+      matchedUser.id,
       ctx.clientIp,
       ctx.userAgent,
       timeoutMinutes
     );
 
     await writeAuditLog(ctx.db, {
-      actorId: userRow.id,
-      actorEmail: userRow.email,
+      actorId: matchedUser.id,
+      actorEmail: matchedUser.email,
       action: 'auth.login_success',
       module: 'auth',
       targetType: 'user',
-      targetId: userRow.id,
+      targetId: matchedUser.id,
       ipAddress: ctx.clientIp,
       userAgent: ctx.userAgent,
     });
