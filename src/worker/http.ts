@@ -14,9 +14,10 @@ export function getClientIp(request: Request): string {
 export function withSecurityHeaders(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set('X-Content-Type-Options', 'nosniff');
-  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  headers.set('Referrer-Policy', 'no-referrer');
   headers.set('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
   headers.set('X-Frame-Options', 'SAMEORIGIN');
+  headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,

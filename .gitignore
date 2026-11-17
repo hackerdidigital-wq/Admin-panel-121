@@ -10,4 +10,4 @@ uploads/
 .playwright-cli/
 .data/
 .wrangler/
-
+public/assets/aistudio/
