@@ -1,0 +1,18 @@
+name = "aegis-enterprise-console"
+main = "src/worker/index.ts"
+compatibility_date = "2026-03-01"
+workers_dev = true
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# Free-tier Cloudflare D1 SQLite database binding.
+# Create your free D1 database with: npx wrangler d1 create aegis-enterprise-db
+# Then replace database_id below before deploying (or inject via CI).
+[[d1_databases]]
+binding = "DB"
+database_name = "aegis-enterprise-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"

@@ -1,0 +1,6 @@
+{
+  "name": "Aegis Enterprise Console",
+  "description": "Zero-cost enterprise administration platform running on Cloudflare Workers, Cloudflare D1 SQLite, PBKDF2/TOTP session authentication, RBAC, SHA-256 hash-chained audit logs, and GitHub-first CI/CD.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

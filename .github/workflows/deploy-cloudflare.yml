@@ -1,0 +1,64 @@
+name: Deploy to Cloudflare Workers & D1 (Free Tier)
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Optional Git tag or commit SHA to build and deploy (supports rollback)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: 'cloudflare-workers-deploy'
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build, Migrate D1 & Deploy Worker + Static Assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck, test, and build static bundle
+        run: |
+          npm run lint
+          npm test
+          npm run build
+
+      - name: Verify Cloudflare credentials configured
+        id: cf-check
+        run: |
+          if [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}" ] || [ -z "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" ]; then
+            echo "configured=false" >> $GITHUB_OUTPUT
+            echo "::notice::CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID secret is not set. Skipping remote Wrangler deploy."
+          else
+            echo "configured=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Apply D1 Migrations & Deploy to Free workers.dev Subdomain
+        if: steps.cf-check.outputs.configured == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler d1 migrations apply aegis-enterprise-db --remote
+          npx wrangler deploy
