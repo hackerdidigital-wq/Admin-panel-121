@@ -15,5 +15,5 @@ run_worker_first = ["/api/*"]
 [[d1_databases]]
 binding = "DB"
 database_name = "aegis-enterprise-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "729e2d77-0091-419f-875e-c862aca1ad8e"
 migrations_dir = "migrations"
