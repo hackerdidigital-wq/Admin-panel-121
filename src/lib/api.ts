@@ -8,14 +8,45 @@ export class ApiError extends Error {
   }
 }
 
+let cachedCsrfToken: string | null = null;
+
+function readCsrfCookie(): string | null {
+  if (typeof document === 'undefined') return null;
+  const pairs = document.cookie ? document.cookie.split(';') : [];
+  for (const part of pairs) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    if (key === 'aegis_csrf') {
+      const val = part.slice(idx + 1).trim();
+      try {
+        return decodeURIComponent(val);
+      } catch {
+        return val;
+      }
+    }
+  }
+  return null;
+}
+
 export async function apiRequest<T = unknown>(
   path: string,
   options: RequestInit & { timeoutMs?: number } = {}
 ): Promise<T> {
   const { timeoutMs = 12_000, ...fetchOptions } = options;
   const headers = new Headers(fetchOptions.headers);
+  const method = (fetchOptions.method || 'GET').toUpperCase();
+
   if (fetchOptions.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
+  }
+
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    headers.set('X-Requested-With', 'XMLHttpRequest');
+    const csrfToken = readCsrfCookie() || cachedCsrfToken;
+    if (csrfToken && !headers.has('X-CSRF-Token')) {
+      headers.set('X-CSRF-Token', csrfToken);
+    }
   }
 
   const controller = new AbortController();
@@ -35,12 +66,18 @@ export async function apiRequest<T = unknown>(
       if (contentType.includes('application/json')) {
         const payload = (await response.json()) as { error?: string };
         if (payload?.error) message = payload.error;
+      } else if (response.status === 403) {
+        message = 'Forbidden (403): Origin or CSRF verification failed. Reload the page and retry.';
       }
       throw new ApiError(response.status, message);
     }
 
     if (contentType.includes('application/json')) {
-      return (await response.json()) as T;
+      const payload = (await response.json()) as T & { csrfToken?: unknown };
+      if (payload && typeof payload === 'object' && typeof payload.csrfToken === 'string') {
+        cachedCsrfToken = payload.csrfToken;
+      }
+      return payload;
     }
     return (await response.text()) as unknown as T;
   } catch (err) {

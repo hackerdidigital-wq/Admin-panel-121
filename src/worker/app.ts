@@ -54,7 +54,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
   }
 
   // CSRF check on mutating requests
-  const csrfFail = verifyCsrfOrigin(request);
+  const csrfFail = verifyCsrfOrigin(request, env.APP_URL);
   if (csrfFail) {
     return withSecurityHeaders(applyCorsHeaders(request, csrfFail, env.APP_URL));
   }

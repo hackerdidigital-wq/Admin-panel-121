@@ -18,6 +18,7 @@ import { hasPermission } from '../../lib/rbac.ts';
 import {
   buildOtpAuthUri,
   computeSha256,
+  generateSessionToken,
   generateTotpSecret,
   generateUid,
   hashPassword,
@@ -31,11 +32,14 @@ import { isValidEmail } from '../../lib/validation.ts';
 import { writeAuditLog } from '../audit.ts';
 import { createUserSession, extractSessionToken, requireAuth, requirePermission } from '../auth.ts';
 import {
+  buildCsrfCookieHeader,
   buildSessionCookieHeader,
   clearSessionCookieHeader,
+  CSRF_COOKIE_NAME,
   errorResponse,
   isHttpsRequest,
   jsonResponse,
+  parseCookies,
   readJsonBody,
 } from '../http.ts';
 import type { WorkerRouter } from '../router.ts';
@@ -123,12 +127,24 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
         .limit(1);
       const emailCfg = emailSetting[0]?.value as { configured?: boolean } | undefined;
 
-      return jsonResponse({
-        authenticated,
-        needsSetup: configuredCount === 0,
-        databaseReady: true,
-        emailProviderConfigured: Boolean(ctx.env.EMAIL_PROVIDER_URL || emailCfg?.configured),
-      });
+      const existingCsrf = parseCookies(ctx.request)[CSRF_COOKIE_NAME];
+      const csrfToken =
+        existingCsrf && /^[a-f0-9]{32,128}$/i.test(existingCsrf)
+          ? existingCsrf
+          : generateSessionToken();
+      const secure = isHttpsRequest(ctx.request);
+
+      return jsonResponse(
+        {
+          authenticated,
+          needsSetup: configuredCount === 0,
+          databaseReady: true,
+          emailProviderConfigured: Boolean(ctx.env.EMAIL_PROVIDER_URL || emailCfg?.configured),
+          csrfToken,
+        },
+        200,
+        { 'Set-Cookie': buildCsrfCookieHeader(csrfToken, secure) }
+      );
     } catch (err) {
       return errorResponse(503, err instanceof Error ? err.message : 'Database unavailable');
     }
@@ -237,10 +253,20 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
     });
 
     const secure = isHttpsRequest(ctx.request);
+    const existingCsrf = parseCookies(ctx.request)[CSRF_COOKIE_NAME];
+    const csrfToken =
+      existingCsrf && /^[a-f0-9]{32,128}$/i.test(existingCsrf)
+        ? existingCsrf
+        : generateSessionToken();
     return jsonResponse(
-      { ok: true, userId: admin.id },
+      { ok: true, userId: admin.id, csrfToken },
       201,
-      { 'Set-Cookie': buildSessionCookieHeader(rawToken, 480 * 60, secure) }
+      {
+        'Set-Cookie': [
+          buildSessionCookieHeader(rawToken, 480 * 60, secure),
+          buildCsrfCookieHeader(csrfToken, secure),
+        ],
+      }
     );
   });
 
@@ -373,10 +399,20 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
     });
 
     const secure = isHttpsRequest(ctx.request);
+    const existingCsrf = parseCookies(ctx.request)[CSRF_COOKIE_NAME];
+    const csrfToken =
+      existingCsrf && /^[a-f0-9]{32,128}$/i.test(existingCsrf)
+        ? existingCsrf
+        : generateSessionToken();
     return jsonResponse(
-      { ok: true, requiresTwoFactor: false },
+      { ok: true, requiresTwoFactor: false, csrfToken },
       200,
-      { 'Set-Cookie': buildSessionCookieHeader(rawToken, timeoutMinutes * 60, secure) }
+      {
+        'Set-Cookie': [
+          buildSessionCookieHeader(rawToken, timeoutMinutes * 60, secure),
+          buildCsrfCookieHeader(csrfToken, secure),
+        ],
+      }
     );
   });
 

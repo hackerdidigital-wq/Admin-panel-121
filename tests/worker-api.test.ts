@@ -316,3 +316,71 @@ test('Worker API RBAC enforcement, Backup SHA-256 verification, and Audit Hash C
     close();
   }
 });
+
+test('Reverse-proxy CSRF Origin validation, X-Forwarded-Host spoofing guard, double-submit CSRF token, and HTTPS iframe cookies', async () => {
+  const { env, close } = createTestEnv();
+  env.APP_URL = 'https://ais-dev-example.asia-southeast1.run.app';
+  try {
+    // 1. Cross-origin spoofed X-Forwarded-Host on non-loopback production host MUST still be rejected (403)
+    const spoofedProd = await apiCall(env, 'POST', '/api/auth/setup', {
+      body: { password: 'SuperPassword#2026' },
+      headers: {
+        host: 'aegis.example.workers.dev',
+        origin: 'https://evil.example',
+        'x-forwarded-host': 'evil.example',
+      },
+    });
+    assert.equal(spoofedProd.status, 403);
+
+    // 2. Fetch status to get CSRF cookie & token under AI Studio Preview reverse-proxy headers
+    const statusRes = await apiCall(env, 'GET', '/api/auth/status', {
+      headers: {
+        host: 'localhost:3000',
+        'x-forwarded-host': 'ais-pre-example.asia-southeast1.run.app',
+        origin: 'https://ais-pre-example.asia-southeast1.run.app',
+      },
+    });
+    assert.equal(statusRes.status, 200);
+    const statusBody = (await statusRes.json()) as { needsSetup: boolean; csrfToken: string };
+    assert.equal(statusBody.needsSetup, true);
+    assert.ok(statusBody.csrfToken.length >= 32);
+    const csrfCookie = extractCookieValue(statusRes, 'aegis_csrf');
+    assert.ok(csrfCookie.startsWith('aegis_csrf='));
+
+    // 3. When aegis_csrf cookie is present, missing/wrong X-CSRF-Token header MUST be rejected (403)
+    const missingCsrfHeader = await apiCall(env, 'POST', '/api/auth/setup', {
+      cookie: csrfCookie,
+      body: { password: 'SuperPassword#2026' },
+      headers: {
+        host: 'localhost:3000',
+        'x-forwarded-host': 'ais-pre-example.asia-southeast1.run.app',
+        origin: 'https://ais-pre-example.asia-southeast1.run.app',
+      },
+    });
+    assert.equal(missingCsrfHeader.status, 403);
+
+    // 4. Reverse-proxied setup with valid Origin + X-Forwarded-Host + matching X-CSRF-Token succeeds (201)
+    //    and emits SameSite=None; Secure; Partitioned for cross-site HTTPS iframes
+    const setupRes = await apiCall(env, 'POST', '/api/auth/setup', {
+      cookie: csrfCookie,
+      body: { password: 'SuperPassword#2026' },
+      headers: {
+        host: 'localhost:3000',
+        'x-forwarded-host': 'ais-pre-example.asia-southeast1.run.app',
+        'x-forwarded-proto': 'http', // Simulate NGINX rewriting proto while Origin is https://
+        origin: 'https://ais-pre-example.asia-southeast1.run.app',
+        'x-csrf-token': statusBody.csrfToken,
+      },
+    });
+    assert.equal(setupRes.status, 201);
+    const setCookies = setupRes.headers.getSetCookie();
+    const sessionHeader = setCookies.find((c) => c.startsWith('aegis_session=')) || '';
+    assert.ok(sessionHeader.includes('HttpOnly'));
+    assert.ok(sessionHeader.includes('SameSite=None'));
+    assert.ok(sessionHeader.includes('Secure'));
+    assert.ok(sessionHeader.includes('Partitioned'));
+  } finally {
+    close();
+  }
+});
+

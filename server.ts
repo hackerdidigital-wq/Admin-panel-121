@@ -30,7 +30,11 @@ async function startServer() {
   app.use('/api', express.raw({ type: '*/*', limit: '4mb' }), async (req, res) => {
     try {
       const host = req.headers.host || `localhost:${PORT}`;
-      const protocol = req.protocol || 'http';
+      const forwardedProto = req.headers['x-forwarded-proto'];
+      const protocol =
+        (typeof forwardedProto === 'string' ? forwardedProto.split(',')[0].trim() : '') ||
+        req.protocol ||
+        'http';
       const targetUrl = `${protocol}://${host}${req.originalUrl}`;
 
       const headers = new Headers();
@@ -57,10 +61,13 @@ async function startServer() {
       const webRes = await handleApiRequest(webReq, getLocalWorkerEnv());
       res.status(webRes.status);
 
+      const setCookies =
+        typeof webRes.headers.getSetCookie === 'function' ? webRes.headers.getSetCookie() : [];
+      for (const cookieVal of setCookies) {
+        res.append('Set-Cookie', cookieVal);
+      }
       webRes.headers.forEach((value, key) => {
-        if (key.toLowerCase() === 'set-cookie') {
-          res.append('Set-Cookie', value);
-        } else {
+        if (key.toLowerCase() !== 'set-cookie') {
           res.setHeader(key, value);
         }
       });
