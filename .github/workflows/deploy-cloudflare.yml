@@ -128,9 +128,9 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          DEPLOY_OUT=$(npx wrangler deploy 2>&1)
-          echo "$DEPLOY_OUT"
-          WORKERS_URL=$(echo "$DEPLOY_OUT" | grep -Eo 'https://[a-zA-Z0-9._-]+\.workers\.dev' | head -n 1 || true)
+          set -o pipefail
+          npx wrangler deploy 2>&1 | tee /tmp/wrangler-deploy.log
+          WORKERS_URL=$(grep -Eo 'https://[a-zA-Z0-9._-]+\.workers\.dev' /tmp/wrangler-deploy.log | head -n 1 || true)
           echo "url=$WORKERS_URL" >> "$GITHUB_OUTPUT"
 
       - name: Verify live production endpoints
@@ -138,10 +138,10 @@ jobs:
         run: |
           LIVE_URL="${{ steps.cf-deploy.outputs.url }}"
           echo "Verifying live deployment at $LIVE_URL"
-          curl -fsSL "$LIVE_URL/" >/dev/null
-          HEALTH=$(curl -fsSL "$LIVE_URL/api/health")
+          curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors "$LIVE_URL/" >/dev/null
+          HEALTH=$(curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors "$LIVE_URL/api/health")
           echo "Health response: $HEALTH"
           echo "$HEALTH" | grep -q '"engine":"cloudflare-d1-sqlite"'
-          STATUS=$(curl -fsSL "$LIVE_URL/api/auth/status")
+          STATUS=$(curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors "$LIVE_URL/api/auth/status")
           echo "Auth status: $STATUS"
           echo "$STATUS" | grep -q '"databaseReady":true'
