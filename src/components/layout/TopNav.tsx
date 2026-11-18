@@ -96,7 +96,7 @@ export const TopNav: React.FC<TopNavProps> = ({
                 const v = e.target.value;
                 setSelectedAppId(v === 'all' ? 'all' : Number(v));
               }}
-              className="h-9 max-w-[128px] truncate bg-transparent text-xs font-medium text-slate-800 focus:outline-none sm:max-w-[190px] dark:text-slate-100"
+              className="h-9 max-w-[96px] truncate bg-transparent text-xs font-medium text-slate-800 focus:outline-none sm:max-w-[190px] dark:text-slate-100"
             >
               <option value="all" className="dark:bg-slate-900">
                 All Apps ({apps.length})
@@ -145,7 +145,7 @@ export const TopNav: React.FC<TopNavProps> = ({
             </button>
 
             {notifOpen && (
-              <div className="absolute right-0 top-11 z-40 w-80 rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-800 dark:bg-slate-900">
+              <div className="fixed inset-x-3 top-14 z-40 rounded-xl border border-slate-200 bg-white shadow-xl sm:absolute sm:inset-x-auto sm:right-0 sm:top-11 sm:w-80 dark:border-slate-800 dark:bg-slate-900">
                 <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5 dark:border-slate-800">
                   <span className="text-xs font-semibold text-slate-900 dark:text-slate-100">
                     Notifications

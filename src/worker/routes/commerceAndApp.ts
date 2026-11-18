@@ -11,7 +11,7 @@ import { toCsv } from '../../lib/csv.ts';
 import { sanitizeText } from '../../lib/security.ts';
 import { parsePaginationQuery } from '../../lib/validation.ts';
 import { writeAuditLog } from '../audit.ts';
-import { requirePermission } from '../auth.ts';
+import { requireAppAccess, requirePermission } from '../auth.ts';
 import { errorResponse, jsonResponse, queryRecord, readJsonBody } from '../http.ts';
 import type { WorkerRouter } from '../router.ts';
 import type { WorkerContext } from '../types.ts';
@@ -290,9 +290,6 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
   });
 
   router.post('/api/ads', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'ads.manage');
-    if (permFail) return permFail;
-
     const body = await readJsonBody<{
       appId?: number | null;
       name?: string;
@@ -307,14 +304,18 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
       errorMessage?: string;
     }>(ctx.request);
 
+    const appId = parseOptionalAppId(body.appId);
+    const permFail = appId
+      ? await requireAppAccess(ctx, appId, ['ads.manage', 'apps.manage'])
+      : await requirePermission(ctx, 'ads.manage');
+    if (permFail) return permFail;
+
     const name = sanitizeText(body.name, 100);
     const network = sanitizeText(body.network, 60);
     const placement = sanitizeText(body.placement, 80);
     if (!name || !network || !placement) {
       return errorResponse(400, 'Ad configuration name, network, and placement are required.');
     }
-
-    const appId = parseOptionalAppId(body.appId);
     const created = await ctx.db
       .insert(adConfigs)
       .values({
@@ -351,12 +352,17 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
   });
 
   router.patch('/api/ads/:id', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'ads.manage');
-    if (permFail) return permFail;
-
     const id = Number(ctx.params.id);
     const existing = await ctx.db.select().from(adConfigs).where(eq(adConfigs.id, id)).limit(1);
-    if (!existing[0]) return errorResponse(404, 'Ad configuration not found.');
+    if (!existing[0]) {
+      const permFail = await requirePermission(ctx, 'ads.manage');
+      if (permFail) return permFail;
+      return errorResponse(404, 'Ad configuration not found.');
+    }
+    const permFail = existing[0].appId
+      ? await requireAppAccess(ctx, existing[0].appId, ['ads.manage', 'apps.manage'])
+      : await requirePermission(ctx, 'ads.manage');
+    if (permFail) return permFail;
 
     const body = await readJsonBody<{
       name?: string;
@@ -401,10 +407,13 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
   });
 
   router.delete('/api/ads/:id', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'ads.manage');
+    const id = Number(ctx.params.id);
+    const existing = await ctx.db.select().from(adConfigs).where(eq(adConfigs.id, id)).limit(1);
+    const permFail = existing[0]?.appId
+      ? await requireAppAccess(ctx, existing[0].appId, ['ads.manage', 'apps.manage'])
+      : await requirePermission(ctx, 'ads.manage');
     if (permFail) return permFail;
 
-    const id = Number(ctx.params.id);
     await ctx.db.delete(adConfigs).where(eq(adConfigs.id, id));
     return jsonResponse({ deleted: true });
   });
@@ -447,9 +456,6 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
   });
 
   router.post('/api/app/flags', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'app.manage');
-    if (permFail) return permFail;
-
     const body = await readJsonBody<{
       appId?: number | null;
       key?: string;
@@ -460,6 +466,11 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
     }>(ctx.request);
 
     const appId = parseOptionalAppId(body.appId);
+    const permFail = appId
+      ? await requireAppAccess(ctx, appId, ['app.manage', 'apps.manage'])
+      : await requirePermission(ctx, 'app.manage');
+    if (permFail) return permFail;
+
     const rawKey = sanitizeText(body.key, 80).toLowerCase().replace(/[^a-z0-9._-]/g, '-');
     const name = sanitizeText(body.name, 100);
     if (!rawKey || !name) {
@@ -536,18 +547,24 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
   });
 
   router.patch('/api/app/flags/:id', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'app.manage');
+    const id = Number(ctx.params.id);
+    const existing = await ctx.db.select().from(featureFlags).where(eq(featureFlags.id, id)).limit(1);
+    if (!existing[0]) {
+      const permFail = await requirePermission(ctx, 'app.manage');
+      if (permFail) return permFail;
+      return errorResponse(404, 'Feature flag not found.');
+    }
+    const permFail = existing[0].appId
+      ? await requireAppAccess(ctx, existing[0].appId, ['app.manage', 'apps.manage'])
+      : await requirePermission(ctx, 'app.manage');
     if (permFail) return permFail;
 
-    const id = Number(ctx.params.id);
     const body = await readJsonBody<{
       name?: string;
       description?: string;
       isEnabled?: boolean;
       rolloutPercentage?: number;
     }>(ctx.request);
-    const existing = await ctx.db.select().from(featureFlags).where(eq(featureFlags.id, id)).limit(1);
-    if (!existing[0]) return errorResponse(404, 'Feature flag not found.');
 
     const updated = await ctx.db
       .update(featureFlags)
@@ -582,17 +599,17 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
   });
 
   router.delete('/api/app/flags/:id', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'app.manage');
-    if (permFail) return permFail;
     const id = Number(ctx.params.id);
+    const existing = await ctx.db.select().from(featureFlags).where(eq(featureFlags.id, id)).limit(1);
+    const permFail = existing[0]?.appId
+      ? await requireAppAccess(ctx, existing[0].appId, ['app.manage', 'apps.manage'])
+      : await requirePermission(ctx, 'app.manage');
+    if (permFail) return permFail;
     await ctx.db.delete(featureFlags).where(eq(featureFlags.id, id));
     return jsonResponse({ deleted: true });
   });
 
   router.post('/api/app/releases', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'app.manage');
-    if (permFail) return permFail;
-
     const body = await readJsonBody<{
       appId?: number | null;
       version?: string;
@@ -603,6 +620,11 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
     }>(ctx.request);
 
     const appId = parseOptionalAppId(body.appId);
+    const permFail = appId
+      ? await requireAppAccess(ctx, appId, ['app.manage', 'apps.manage'])
+      : await requirePermission(ctx, 'app.manage');
+    if (permFail) return permFail;
+
     const version = sanitizeText(body.version, 40);
     const minSupportedVersion = sanitizeText(body.minSupportedVersion || version, 40);
     if (!version) return errorResponse(400, 'Version string is required.');
@@ -654,13 +676,19 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
   });
 
   router.patch('/api/app/releases/:id', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'app.manage');
+    const id = Number(ctx.params.id);
+    const existing = await ctx.db.select().from(appReleases).where(eq(appReleases.id, id)).limit(1);
+    if (!existing[0]) {
+      const permFail = await requirePermission(ctx, 'app.manage');
+      if (permFail) return permFail;
+      return errorResponse(404, 'Release not found.');
+    }
+    const permFail = existing[0].appId
+      ? await requireAppAccess(ctx, existing[0].appId, ['app.manage', 'apps.manage'])
+      : await requirePermission(ctx, 'app.manage');
     if (permFail) return permFail;
 
-    const id = Number(ctx.params.id);
     const body = await readJsonBody<{ status?: string; forceUpdate?: boolean }>(ctx.request);
-    const existing = await ctx.db.select().from(appReleases).where(eq(appReleases.id, id)).limit(1);
-    if (!existing[0]) return errorResponse(404, 'Release not found.');
 
     const nextStatus = ['draft', 'active', 'rolled_back'].includes(body.status || '')
       ? body.status!

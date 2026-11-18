@@ -270,7 +270,7 @@ function getPlatformDefaultCollections(
   platform: string
 ): { modules: string[]; collections: ProposedCollectionSpec[] } {
   const norm = platform.toLowerCase();
-  if (norm === 'unity' || norm === 'game') {
+  if (norm === 'unity') {
     const specs: Array<{ slug: string; name: string; desc: string; fields: CollectionFieldSpec[] }> = [
       {
         slug: 'leaderboard',
@@ -292,6 +292,66 @@ function getPlatformDefaultCollections(
           { name: 'item_sku', label: 'Item SKU', type: 'text', required: true },
           { name: 'quantity', label: 'Quantity', type: 'number', required: true },
           { name: 'equipped', label: 'Equipped', type: 'boolean', required: false },
+        ],
+      },
+      {
+        slug: 'unity_remote_tuning',
+        name: 'Unity Remote Tuning',
+        desc: 'Frame-rate targets, asset bundle versions, and remote Unity SDK parameters.',
+        fields: [
+          { name: 'config_key', label: 'Config Key', type: 'text', required: true },
+          { name: 'quality_tier', label: 'Quality Tier', type: 'text', required: false },
+          { name: 'target_fps', label: 'Target FPS', type: 'number', required: false },
+          { name: 'enabled', label: 'Enabled', type: 'boolean', required: false },
+        ],
+      },
+    ];
+    return {
+      modules: ['overview', 'users', 'config', 'releases', 'ads', 'collections', 'storage', 'webhooks'],
+      collections: specs.map((s) => ({
+        slug: s.slug,
+        name: s.name,
+        description: s.desc,
+        fields: s.fields,
+        migrationSql: generateCollectionMigrationSql(namespace, s.slug, s.fields),
+      })),
+    };
+  }
+
+  if (norm === 'game') {
+    const specs: Array<{ slug: string; name: string; desc: string; fields: CollectionFieldSpec[] }> = [
+      {
+        slug: 'player_profiles',
+        name: 'Battle Royale Players',
+        desc: 'Player ranks, K/D telemetry, tier points, and anti-cheat moderation records.',
+        fields: [
+          { name: 'player_id', label: 'Player ID', type: 'text', required: true },
+          { name: 'callsign', label: 'Callsign', type: 'text', required: true },
+          { name: 'rank_tier', label: 'Rank Tier', type: 'text', required: false },
+          { name: 'rating', label: 'MMR / Points', type: 'number', required: false },
+          { name: 'verified', label: 'Fair-Play Verified', type: 'boolean', required: false },
+        ],
+      },
+      {
+        slug: 'br_matches',
+        name: 'Match Lobbies & Maps',
+        desc: 'Active Battle Royale map rotations, lobby caps, and match scheduling.',
+        fields: [
+          { name: 'match_code', label: 'Match Code', type: 'text', required: true },
+          { name: 'map_name', label: 'Map / Arena', type: 'text', required: true },
+          { name: 'max_players', label: 'Max Lobby Players', type: 'number', required: true },
+          { name: 'live', label: 'Lobby Open', type: 'boolean', required: false },
+        ],
+      },
+      {
+        slug: 'weapon_loot_balance',
+        name: 'Weapon & Loot Balance',
+        desc: 'Remote damage, drop-rate, and seasonal weapon tuning table synced via SDK.',
+        fields: [
+          { name: 'weapon_name', label: 'Weapon Name', type: 'text', required: true },
+          { name: 'category', label: 'Weapon Class', type: 'text', required: true },
+          { name: 'damage', label: 'Base Damage', type: 'number', required: true },
+          { name: 'enabled', label: 'In Loot Pool', type: 'boolean', required: false },
         ],
       },
     ];

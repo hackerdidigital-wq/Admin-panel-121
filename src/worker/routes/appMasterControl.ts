@@ -884,12 +884,35 @@ export function registerAppMasterControlRoutes(router: WorkerRouter): void {
       .from(appRecords)
       .where(and(eq(appRecords.appId, app.id), eq(appRecords.collectionId, col.id)))
       .orderBy(desc(appRecords.updatedAt))
-      .limit(100);
+      .limit(200);
+
+    const publishedFilter = ctx.url.searchParams.get('published');
+    const categoryFilter = sanitizeText(ctx.url.searchParams.get('category') || '', 60).toLowerCase();
+    const qFilter = sanitizeText(ctx.url.searchParams.get('q') || '', 80).toLowerCase();
+
+    const filteredRows = rows.filter((r) => {
+      const data = (r.dataJson || {}) as Record<string, unknown>;
+      if (publishedFilter === 'true') {
+        const isPub = data.published === true || String(data.status || '').toLowerCase() === 'published';
+        if (!isPub) return false;
+      } else if (publishedFilter === 'false') {
+        const isPub = data.published === true || String(data.status || '').toLowerCase() === 'published';
+        if (isPub) return false;
+      }
+      if (categoryFilter && String(data.category || '').toLowerCase() !== categoryFilter) {
+        return false;
+      }
+      if (qFilter) {
+        const serialized = JSON.stringify(data).toLowerCase();
+        if (!serialized.includes(qFilter)) return false;
+      }
+      return true;
+    });
 
     return jsonResponse({
       appUid: app.appUid,
       collection: { slug: col.slug, name: col.name, fields: col.fieldsJson },
-      records: rows.map((r) => ({
+      records: filteredRows.slice(0, 100).map((r) => ({
         id: r.id,
         recordUid: r.recordUid,
         data: r.dataJson,

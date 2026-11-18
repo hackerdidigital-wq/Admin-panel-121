@@ -33,6 +33,7 @@ jobs:
             import fs from 'node:fs';
             import { DatabaseSync } from 'node:sqlite';
             const db = new DatabaseSync(':memory:');
+            db.exec('PRAGMA foreign_keys = ON;');
             const files = fs.readdirSync('migrations').filter((f) => f.endsWith('.sql')).sort();
             for (const f of files) {
               db.exec(fs.readFileSync('migrations/' + f, 'utf8'));

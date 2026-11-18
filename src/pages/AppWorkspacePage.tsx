@@ -5,12 +5,14 @@ import {
   Copy,
   Database,
   Download,
+  Edit3,
   FileUp,
   Flag,
   KeyRound,
   Plus,
   RefreshCw,
   RotateCw,
+  Search,
   ShieldAlert,
   ShieldCheck,
   Terminal,
@@ -233,6 +235,10 @@ export const AppWorkspacePage: React.FC<{
   const [recordsLoading, setRecordsLoading] = useState(false);
   const [showDdl, setShowDdl] = useState(false);
   const [recordForm, setRecordForm] = useState<Record<string, string>>({});
+  const [editingRecordId, setEditingRecordId] = useState<number | null>(null);
+  const [recordSearch, setRecordSearch] = useState('');
+  const [recordCategoryFilter, setRecordCategoryFilter] = useState('all');
+  const [recordPublishFilter, setRecordPublishFilter] = useState<'all' | 'published' | 'draft'>('all');
   const [addingRecord, setAddingRecord] = useState(false);
 
   const [modName, setModName] = useState('');
@@ -340,6 +346,11 @@ export const AppWorkspacePage: React.FC<{
   }, [loadWorkspace]);
 
   useEffect(() => {
+    setEditingRecordId(null);
+    setRecordForm({});
+    setRecordSearch('');
+    setRecordCategoryFilter('all');
+    setRecordPublishFilter('all');
     if (activeCollectionSlug) {
       void loadCollectionRecords();
     }
@@ -379,6 +390,8 @@ export const AppWorkspacePage: React.FC<{
   const cap = app.discoveredCapabilities;
   const activeCollection = collections.find((c) => c.slug === activeCollectionSlug) || null;
   const isMaintenance = app.status === 'maintenance';
+  const isGamePlatform = app.platform === 'unity' || app.platform === 'game';
+  const canManageAppScoped = hasPerm('app.manage') || hasPerm('apps.manage');
 
   const handleToggleMaintenance = async () => {
     const nextStatus = isMaintenance ? 'connected' : 'maintenance';
@@ -513,7 +526,24 @@ export const AppWorkspacePage: React.FC<{
     }
   };
 
-  const handleAddCollectionRecord = async (e: React.FormEvent) => {
+  const startEditCollectionRecord = (rec: WorkspaceRecordRow) => {
+    if (!activeCollection) return;
+    const nextForm: Record<string, string> = {};
+    for (const f of activeCollection.fieldsJson) {
+      const val = rec.dataJson?.[f.name];
+      if (f.type === 'json') {
+        nextForm[f.name] = typeof val === 'object' && val !== null ? JSON.stringify(val) : String(val ?? '');
+      } else if (f.type === 'boolean') {
+        nextForm[f.name] = val === true || val === 'true' || val === 1 ? 'true' : 'false';
+      } else {
+        nextForm[f.name] = val !== undefined && val !== null ? String(val) : '';
+      }
+    }
+    setRecordForm(nextForm);
+    setEditingRecordId(rec.id);
+  };
+
+  const handleSaveCollectionRecord = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeCollection) return;
     setAddingRecord(true);
@@ -536,12 +566,21 @@ export const AppWorkspacePage: React.FC<{
         }
       }
 
-      await apiRequest(`/apps/${app.id}/collections/${activeCollection.slug}/records`, {
-        method: 'POST',
-        body: JSON.stringify({ data: payload }),
-      });
+      if (editingRecordId !== null) {
+        await apiRequest(`/apps/${app.id}/collections/${activeCollection.slug}/records/${editingRecordId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ data: payload }),
+        });
+        pushToast({ type: 'success', title: `Updated record in ${activeCollection.name}` });
+      } else {
+        await apiRequest(`/apps/${app.id}/collections/${activeCollection.slug}/records`, {
+          method: 'POST',
+          body: JSON.stringify({ data: payload }),
+        });
+        pushToast({ type: 'success', title: `Saved record to ${activeCollection.name}` });
+      }
       setRecordForm({});
-      pushToast({ type: 'success', title: `Saved record to ${activeCollection.name}` });
+      setEditingRecordId(null);
       await loadCollectionRecords();
       await loadWorkspace();
     } catch (err) {
@@ -552,6 +591,33 @@ export const AppWorkspacePage: React.FC<{
       });
     } finally {
       setAddingRecord(false);
+    }
+  };
+
+  const handleToggleRecordPublished = async (rec: WorkspaceRecordRow) => {
+    if (!activeCollection) return;
+    const currentPub = rec.dataJson?.published === true || rec.dataJson?.published === 'true';
+    try {
+      await apiRequest(`/apps/${app.id}/collections/${activeCollection.slug}/records/${rec.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          data: {
+            ...(rec.dataJson || {}),
+            published: !currentPub,
+          },
+        }),
+      });
+      pushToast({
+        type: 'success',
+        title: !currentPub ? 'Record published to SDK' : 'Record moved to draft',
+      });
+      await loadCollectionRecords();
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Failed to update publish status',
+        description: err instanceof Error ? err.message : undefined,
+      });
     }
   };
 
@@ -664,7 +730,7 @@ export const AppWorkspacePage: React.FC<{
   const tabItems: Array<{ id: WorkspaceTab; label: string }> = [
     { id: 'overview', label: 'Overview & Controls' },
     { id: 'collections', label: `Collections & Backend (${collections.length})` },
-    { id: 'users', label: `End-Users (${stats.endUsersCount})` },
+    { id: 'users', label: `${isGamePlatform ? 'Players' : 'End-Users'} (${stats.endUsersCount})` },
     { id: 'config', label: `Flags & Releases (${flags.length + releases.length})` },
     { id: 'storage', label: `Storage (${stats.filesCount})` },
     { id: 'sdk', label: `SDK & Keys (${stats.activeKeysCount})` },
@@ -782,7 +848,7 @@ export const AppWorkspacePage: React.FC<{
         <div className="space-y-6">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-              <p className="text-xs text-slate-500">End-Users</p>
+              <p className="text-xs text-slate-500">{isGamePlatform ? 'Registered Players' : 'End-Users'}</p>
               <p className="mt-1 font-display text-2xl font-semibold tabular-nums">
                 {stats.endUsersCount}
               </p>
@@ -1103,111 +1169,292 @@ export const AppWorkspacePage: React.FC<{
 
                 {hasPerm('apps.manage') && (
                   <form
-                    onSubmit={handleAddCollectionRecord}
-                    className="grid gap-2.5 rounded-lg border border-slate-200 bg-slate-50/60 p-3 sm:grid-cols-2 lg:grid-cols-4 dark:border-slate-800 dark:bg-slate-950/60 text-xs"
+                    onSubmit={handleSaveCollectionRecord}
+                    className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3.5 dark:border-slate-800 dark:bg-slate-950/60 text-xs"
                   >
-                    {activeCollection.fieldsJson.map((f) => (
-                      <div key={f.name}>
-                        <label className="block font-medium text-slate-700 dark:text-slate-300">
-                          {f.label} ({f.type})
-                        </label>
-                        {f.type === 'boolean' ? (
-                          <select
-                            value={recordForm[f.name] ?? 'false'}
-                            onChange={(e) => setRecordForm((p) => ({ ...p, [f.name]: e.target.value }))}
-                            className="mt-1 h-8 w-full rounded-md border border-slate-200 bg-white px-2 dark:border-slate-700 dark:bg-slate-900"
-                          >
-                            <option value="true">true</option>
-                            <option value="false">false</option>
-                          </select>
-                        ) : (
-                          <input
-                            type={f.type === 'number' ? 'number' : 'text'}
-                            required={f.required}
-                            value={recordForm[f.name] ?? ''}
-                            onChange={(e) => setRecordForm((p) => ({ ...p, [f.name]: e.target.value }))}
-                            placeholder={f.type === 'json' ? '{"key":"value"}' : f.label}
-                            className="mt-1 h-8 w-full rounded-md border border-slate-200 bg-white px-2.5 dark:border-slate-700 dark:bg-slate-900"
-                          />
-                        )}
+                    {editingRecordId !== null && (
+                      <div className="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50/70 px-3 py-1.5 text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300">
+                        <span className="font-medium">Editing existing record #{editingRecordId}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingRecordId(null);
+                            setRecordForm({});
+                          }}
+                          className="font-medium underline"
+                        >
+                          Cancel Edit
+                        </button>
                       </div>
-                    ))}
-                    <div className="flex items-end">
+                    )}
+                    <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+                      {activeCollection.fieldsJson.map((f) => {
+                        const isLongText =
+                          f.type === 'text' &&
+                          /text|body|content|description|poem|shayari|quote|notes|message|summary/i.test(f.name);
+                        return (
+                          <div key={f.name} className={isLongText ? 'sm:col-span-2 lg:col-span-4' : ''}>
+                            <label className="block font-medium text-slate-700 dark:text-slate-300">
+                              {f.label} ({f.type})
+                            </label>
+                            {f.type === 'boolean' ? (
+                              <select
+                                aria-label={f.label}
+                                value={recordForm[f.name] ?? 'false'}
+                                onChange={(e) => setRecordForm((p) => ({ ...p, [f.name]: e.target.value }))}
+                                className="mt-1 h-8 w-full rounded-md border border-slate-200 bg-white px-2 dark:border-slate-700 dark:bg-slate-900"
+                              >
+                                <option value="true">true</option>
+                                <option value="false">false</option>
+                              </select>
+                            ) : isLongText ? (
+                              <textarea
+                                rows={3}
+                                required={f.required}
+                                aria-label={f.label}
+                                value={recordForm[f.name] ?? ''}
+                                onChange={(e) => setRecordForm((p) => ({ ...p, [f.name]: e.target.value }))}
+                                placeholder={f.label}
+                                className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-900"
+                              />
+                            ) : (
+                              <input
+                                type={f.type === 'number' ? 'number' : 'text'}
+                                step={f.type === 'number' ? 'any' : undefined}
+                                required={f.required}
+                                aria-label={f.label}
+                                value={recordForm[f.name] ?? ''}
+                                onChange={(e) => setRecordForm((p) => ({ ...p, [f.name]: e.target.value }))}
+                                placeholder={f.type === 'json' ? '{"key":"value"}' : f.label}
+                                className="mt-1 h-8 w-full rounded-md border border-slate-200 bg-white px-2.5 dark:border-slate-700 dark:bg-slate-900"
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="submit"
                         disabled={addingRecord}
-                        className="h-8 w-full rounded-md bg-slate-900 px-3 font-medium text-white hover:bg-slate-800 dark:bg-blue-600"
+                        className="h-8 rounded-md bg-slate-900 px-4 font-medium text-white hover:bg-slate-800 dark:bg-blue-600"
                       >
-                        {addingRecord ? 'Saving...' : 'Insert Record'}
+                        {addingRecord
+                          ? 'Saving...'
+                          : editingRecordId !== null
+                            ? 'Save Changes'
+                            : 'Insert Record'}
                       </button>
+                      {editingRecordId !== null && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingRecordId(null);
+                            setRecordForm({});
+                          }}
+                          className="h-8 rounded-md border border-slate-200 bg-white px-3 font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                        >
+                          Cancel
+                        </button>
+                      )}
                     </div>
                   </form>
                 )}
 
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-200 text-slate-500 dark:border-slate-800">
-                        <th className="py-2 pr-3 font-medium">Record UID</th>
-                        {activeCollection.fieldsJson.map((f) => (
-                          <th key={f.name} className="py-2 pr-3 font-medium">
-                            {f.label}
-                          </th>
-                        ))}
-                        <th className="py-2 text-right font-medium">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {recordsLoading ? (
-                        <tr>
-                          <td colSpan={activeCollection.fieldsJson.length + 2} className="py-6 text-center text-slate-500">
-                            Loading isolated collection records...
-                          </td>
-                        </tr>
-                      ) : collectionRecords.length === 0 ? (
-                        <tr>
-                          <td colSpan={activeCollection.fieldsJson.length + 2} className="py-8 text-center text-slate-500">
-                            No records in "{activeCollection.name}" yet. Insert a record above or write from the client SDK.
-                          </td>
-                        </tr>
-                      ) : (
-                        collectionRecords.map((rec) => (
-                          <tr key={rec.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
-                            <td className="py-2.5 pr-3 font-mono text-[11px] text-slate-500">{rec.recordUid}</td>
-                            {activeCollection.fieldsJson.map((f) => {
-                              const val = rec.dataJson?.[f.name];
-                              return (
-                                <td key={f.name} className="py-2.5 pr-3 tabular-nums">
-                                  {typeof val === 'object' && val !== null ? JSON.stringify(val) : String(val ?? '-')}
+                {(() => {
+                  const hasCategoryField = activeCollection.fieldsJson.some((f) => f.name === 'category');
+                  const hasPublishedField = activeCollection.fieldsJson.some((f) => f.name === 'published');
+                  const categories = Array.from(
+                    new Set(
+                      collectionRecords
+                        .map((r) => String(r.dataJson?.category ?? '').trim())
+                        .filter(Boolean)
+                    )
+                  ).sort();
+
+                  const filteredRecords = collectionRecords.filter((rec) => {
+                    if (hasCategoryField && recordCategoryFilter !== 'all') {
+                      if (String(rec.dataJson?.category ?? '').trim() !== recordCategoryFilter) return false;
+                    }
+                    if (hasPublishedField && recordPublishFilter !== 'all') {
+                      const pub = rec.dataJson?.published === true || rec.dataJson?.published === 'true';
+                      if (recordPublishFilter === 'published' && !pub) return false;
+                      if (recordPublishFilter === 'draft' && pub) return false;
+                    }
+                    if (recordSearch.trim()) {
+                      const needle = recordSearch.trim().toLowerCase();
+                      const hay = `${rec.recordUid} ${JSON.stringify(rec.dataJson ?? {})}`.toLowerCase();
+                      if (!hay.includes(needle)) return false;
+                    }
+                    return true;
+                  });
+
+                  return (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <div className="relative flex-1 min-w-[180px]">
+                          <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                          <input
+                            value={recordSearch}
+                            onChange={(e) => setRecordSearch(e.target.value)}
+                            placeholder={`Search ${activeCollection.name}...`}
+                            aria-label="Filter collection records"
+                            className="h-8 w-full rounded-md border border-slate-200 bg-white pl-8 pr-3 dark:border-slate-700 dark:bg-slate-950"
+                          />
+                        </div>
+                        {hasCategoryField && (
+                          <select
+                            aria-label="Filter by category"
+                            value={recordCategoryFilter}
+                            onChange={(e) => setRecordCategoryFilter(e.target.value)}
+                            className="h-8 rounded-md border border-slate-200 bg-white px-2.5 dark:border-slate-700 dark:bg-slate-950"
+                          >
+                            <option value="all">All Categories</option>
+                            {categories.map((cat) => (
+                              <option key={cat} value={cat}>
+                                {cat}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        {hasPublishedField && (
+                          <select
+                            aria-label="Filter by publish status"
+                            value={recordPublishFilter}
+                            onChange={(e) =>
+                              setRecordPublishFilter(e.target.value as 'all' | 'published' | 'draft')
+                            }
+                            className="h-8 rounded-md border border-slate-200 bg-white px-2.5 dark:border-slate-700 dark:bg-slate-950"
+                          >
+                            <option value="all">All Statuses</option>
+                            <option value="published">Published Only</option>
+                            <option value="draft">Drafts Only</option>
+                          </select>
+                        )}
+                      </div>
+
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead>
+                            <tr className="border-b border-slate-200 text-slate-500 dark:border-slate-800">
+                              <th className="py-2 pr-3 font-medium">Record UID</th>
+                              {activeCollection.fieldsJson.map((f) => (
+                                <th key={f.name} className="py-2 pr-3 font-medium">
+                                  {f.label}
+                                </th>
+                              ))}
+                              <th className="py-2 text-right font-medium">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                            {recordsLoading ? (
+                              <tr>
+                                <td colSpan={activeCollection.fieldsJson.length + 2} className="py-6 text-center text-slate-500">
+                                  Loading isolated collection records...
                                 </td>
-                              );
-                            })}
-                            <td className="py-2.5 text-right">
-                              {hasPerm('apps.manage') && (
-                                <button
-                                  type="button"
-                                  aria-label={`Delete record ${rec.recordUid}`}
-                                  onClick={async () => {
-                                    await apiRequest(
-                                      `/apps/${app.id}/collections/${activeCollection.slug}/records/${rec.id}`,
-                                      { method: 'DELETE' }
-                                    );
-                                    pushToast({ type: 'success', title: 'Record deleted' });
-                                    await loadCollectionRecords();
-                                    await loadWorkspace();
-                                  }}
-                                  className="rounded border border-slate-200 p-1 text-slate-500 hover:text-red-600 dark:border-slate-700"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
+                              </tr>
+                            ) : filteredRecords.length === 0 ? (
+                              <tr>
+                                <td colSpan={activeCollection.fieldsJson.length + 2} className="py-8 text-center text-slate-500">
+                                  {collectionRecords.length === 0
+                                    ? `No records in "${activeCollection.name}" yet. Insert a record above or write from the client SDK.`
+                                    : 'No matching records for the current filter.'}
+                                </td>
+                              </tr>
+                            ) : (
+                              filteredRecords.map((rec) => {
+                                const isPublished =
+                                  rec.dataJson?.published === true || rec.dataJson?.published === 'true';
+                                return (
+                                  <tr key={rec.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                                    <td
+                                      title={rec.recordUid}
+                                      className="max-w-[92px] truncate py-2.5 pr-3 font-mono text-[11px] text-slate-500"
+                                    >
+                                      {rec.recordUid}
+                                    </td>
+                                    {activeCollection.fieldsJson.map((f) => {
+                                      const val = rec.dataJson?.[f.name];
+                                      if (f.name === 'published' && f.type === 'boolean') {
+                                        return (
+                                          <td key={f.name} className="py-2.5 pr-3 whitespace-nowrap">
+                                            <span
+                                              className={`font-medium ${
+                                                isPublished
+                                                  ? 'text-emerald-700 dark:text-emerald-400'
+                                                  : 'text-amber-700 dark:text-amber-400'
+                                              }`}
+                                            >
+                                              {isPublished ? 'Published' : 'Draft'}
+                                            </span>
+                                          </td>
+                                        );
+                                      }
+                                      return (
+                                        <td key={f.name} className="py-2.5 pr-3 tabular-nums max-w-[170px] truncate">
+                                          {typeof val === 'object' && val !== null
+                                            ? JSON.stringify(val)
+                                            : String(val ?? '-')}
+                                        </td>
+                                      );
+                                    })}
+                                    <td className="py-2.5 text-right whitespace-nowrap">
+                                      {hasPerm('apps.manage') && (
+                                        <div className="inline-flex items-center gap-1">
+                                          {hasPublishedField && (
+                                            <button
+                                              type="button"
+                                              onClick={() => void handleToggleRecordPublished(rec)}
+                                              className={`rounded border px-2 py-1 text-[11px] font-medium ${
+                                                isPublished
+                                                  ? 'border-amber-200 text-amber-700 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-300'
+                                                  : 'border-emerald-200 text-emerald-700 hover:bg-emerald-50 dark:border-emerald-800 dark:text-emerald-300'
+                                              }`}
+                                            >
+                                              {isPublished ? 'Unpublish' : 'Publish'}
+                                            </button>
+                                          )}
+                                          <button
+                                            type="button"
+                                            aria-label={`Edit record ${rec.recordUid}`}
+                                            onClick={() => startEditCollectionRecord(rec)}
+                                            className="rounded border border-slate-200 p-1 text-slate-500 hover:text-blue-600 dark:border-slate-700"
+                                          >
+                                            <Edit3 className="h-3.5 w-3.5" />
+                                          </button>
+                                          <button
+                                            type="button"
+                                            aria-label={`Delete record ${rec.recordUid}`}
+                                            onClick={async () => {
+                                              await apiRequest(
+                                                `/apps/${app.id}/collections/${activeCollection.slug}/records/${rec.id}`,
+                                                { method: 'DELETE' }
+                                              );
+                                              if (editingRecordId === rec.id) {
+                                                setEditingRecordId(null);
+                                                setRecordForm({});
+                                              }
+                                              pushToast({ type: 'success', title: 'Record deleted' });
+                                              await loadCollectionRecords();
+                                              await loadWorkspace();
+                                            }}
+                                            className="rounded border border-slate-200 p-1 text-slate-500 hover:text-red-600 dark:border-slate-700"
+                                          >
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                          </button>
+                                        </div>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  );
+                })()}
               </section>
             ) : (
               <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900">
@@ -1254,9 +1501,17 @@ export const AppWorkspacePage: React.FC<{
                 className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-4 font-medium text-white hover:bg-blue-700"
               >
                 <Users className="h-3.5 w-3.5" />
-                {addingEndUser ? 'Registering...' : 'Add End-User'}
+                {addingEndUser ? 'Registering...' : isGamePlatform ? 'Add Player' : 'Add End-User'}
               </button>
             </form>
+          )}
+
+          {isGamePlatform && (
+            <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+              {app.platform === 'unity'
+                ? 'Unity C# Remote Config & Telemetry: Ban players here to immediately return 403 USER_BANNED on /api/v1/sdk/users/sync and update leaderboard or unity_remote_tuning collections.'
+                : 'Battle Royale Match/Lobby & Anti-Cheat Controls: Banning a player blocks matchmaking sync (403), while br_matches & weapon_loot_balance in Collections control lobby limits and loot tuning.'}
+            </div>
           )}
 
           <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
@@ -1343,7 +1598,7 @@ export const AppWorkspacePage: React.FC<{
               <h2 className="font-display text-sm font-semibold">Feature Flags (Isolated to {app.name})</h2>
               <Flag className="h-4 w-4 text-slate-400" />
             </div>
-            {hasPerm('app.manage') && (
+            {canManageAppScoped && (
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
@@ -1419,7 +1674,7 @@ export const AppWorkspacePage: React.FC<{
 
           <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-6 dark:border-slate-800 dark:bg-slate-900">
             <h2 className="font-display text-sm font-semibold">Releases & AdMob Monetization</h2>
-            {hasPerm('app.manage') && (
+            {canManageAppScoped && (
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();

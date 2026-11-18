@@ -1,7 +1,6 @@
 -- Aegis Enterprise Console — Unlimited Multi-App Platform Migration
 -- Adds 7 multi-app, SDK, webhook, and app-level RBAC tables (33 tables total)
 -- and adds nullable app_id foreign keys for strict multi-app data isolation.
-PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS connected_apps (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

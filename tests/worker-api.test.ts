@@ -1044,3 +1044,249 @@ test('Universal Master Control: App Inspection, Isolated Collections/Flags/Stora
     close();
   }
 });
+
+test('Shayari App Lifecycle (Add, Categorize, Edit, Publish, SDK Filter, Delete), Separate Unity & Battle Royale Games, iOS/REST API, & Cross-App Security', async () => {
+  const { env, close } = createTestEnv();
+  try {
+    const setupRes = await apiCall(env, 'POST', '/api/auth/setup', {
+      body: { password: 'SuperPassword#2026' },
+    });
+    assert.equal(setupRes.status, 201);
+    const superCookie = extractCookieValue(setupRes);
+
+    // 1. Register Shayari App with custom shayari & shayari_categories collections
+    const shayariAppRes = await apiCall(env, 'POST', '/api/apps', {
+      cookie: superCookie,
+      body: {
+        name: 'ShayariVerse App',
+        platform: 'android',
+        packageOrDomain: 'com.aegis.shayariverse',
+        modelsText:
+          'shayari(title:text, shayari_text:text, author:text, category:text, published:boolean); shayari_categories(name:text, slug:text, active:boolean)',
+      },
+    });
+    assert.equal(shayariAppRes.status, 201);
+    const shayariApp = (await shayariAppRes.json()) as {
+      app: { id: number; appUid: string };
+      initialApiKey: string;
+    };
+
+    // Add category + draft Shayari
+    const catRes = await apiCall(env, 'POST', `/api/apps/${shayariApp.app.id}/collections/shayari_categories/records`, {
+      cookie: superCookie,
+      body: { data: { name: 'Romantic', slug: 'romantic', active: true } },
+    });
+    assert.equal(catRes.status, 201);
+
+    const addShayariRes = await apiCall(env, 'POST', `/api/apps/${shayariApp.app.id}/collections/shayari/records`, {
+      cookie: superCookie,
+      body: {
+        data: {
+          title: 'Shaam Ki Yaad',
+          shayari_text: 'Dil ke aaine mein tasveer teri rehti hai...',
+          author: 'Aarav',
+          category: 'Sad',
+          published: false,
+        },
+      },
+    });
+    assert.equal(addShayariRes.status, 201);
+    const createdShayari = (await addShayariRes.json()) as { record: { id: number } };
+
+    // SDK published=true must exclude drafts
+    const sdkDraftCheck = await apiCall(env, 'GET', '/api/v1/sdk/data/shayari?published=true', {
+      headers: { 'x-app-id': shayariApp.app.appUid, 'x-api-key': shayariApp.initialApiKey },
+    });
+    assert.equal(sdkDraftCheck.status, 200);
+    const draftJson = (await sdkDraftCheck.json()) as { records: unknown[] };
+    assert.equal(draftJson.records.length, 0);
+
+    // Edit, re-categorize & publish Shayari
+    const editShayariRes = await apiCall(
+      env,
+      'PATCH',
+      `/api/apps/${shayariApp.app.id}/collections/shayari/records/${createdShayari.record.id}`,
+      {
+        cookie: superCookie,
+        body: {
+          data: {
+            title: 'Shaam Ki Yaad',
+            shayari_text: 'Dil ke aaine mein tasveer teri rehti hai (Edited)',
+            author: 'Aarav',
+            category: 'Romantic',
+            published: true,
+          },
+        },
+      }
+    );
+    assert.equal(editShayariRes.status, 200);
+
+    const sdkPubFiltered = await apiCall(
+      env,
+      'GET',
+      '/api/v1/sdk/data/shayari?published=true&category=Romantic&q=Edited',
+      { headers: { 'x-app-id': shayariApp.app.appUid, 'x-api-key': shayariApp.initialApiKey } }
+    );
+    assert.equal(sdkPubFiltered.status, 200);
+    const pubJson = (await sdkPubFiltered.json()) as {
+      records: Array<{ data: { category: string; published: boolean } }>;
+    };
+    assert.equal(pubJson.records.length, 1);
+    assert.equal(pubJson.records[0].data.category, 'Romantic');
+    assert.equal(pubJson.records[0].data.published, true);
+
+    // Delete Shayari record
+    const delShayariRes = await apiCall(
+      env,
+      'DELETE',
+      `/api/apps/${shayariApp.app.id}/collections/shayari/records/${createdShayari.record.id}`,
+      { cookie: superCookie }
+    );
+    assert.equal(delShayariRes.status, 200);
+
+    // 2. Connect Separate Unity 3D Game & Battle Royale Game + iOS + REST API
+    const [unityRes, brRes, iosRes, apiRes] = await Promise.all([
+      apiCall(env, 'POST', '/api/apps', {
+        cookie: superCookie,
+        body: { name: 'Unity Strike 3D', platform: 'unity', packageOrDomain: 'com.studio.unitystrike' },
+      }),
+      apiCall(env, 'POST', '/api/apps', {
+        cookie: superCookie,
+        body: { name: 'Apex RoyaleArena', platform: 'game', packageOrDomain: 'com.studio.apexroyale' },
+      }),
+      apiCall(env, 'POST', '/api/apps', {
+        cookie: superCookie,
+        body: { name: 'Pulse iOS App', platform: 'ios', packageOrDomain: 'com.studio.pulseios' },
+      }),
+      apiCall(env, 'POST', '/api/apps', {
+        cookie: superCookie,
+        body: { name: 'Core Data Service', platform: 'api', packageOrDomain: 'https://api.example.com' },
+      }),
+    ]);
+    assert.equal(unityRes.status, 201);
+    assert.equal(brRes.status, 201);
+    assert.equal(iosRes.status, 201);
+    assert.equal(apiRes.status, 201);
+
+    const unityApp = (await unityRes.json()) as { app: { id: number; appUid: string }; initialApiKey: string };
+    const brApp = (await brRes.json()) as { app: { id: number; appUid: string }; initialApiKey: string };
+
+    const [unityWs, brWs] = await Promise.all([
+      apiCall(env, 'GET', `/api/apps/${unityApp.app.id}/workspace`, { cookie: superCookie }),
+      apiCall(env, 'GET', `/api/apps/${brApp.app.id}/workspace`, { cookie: superCookie }),
+    ]);
+    const unityWsJson = (await unityWs.json()) as { collections: Array<{ slug: string }> };
+    const brWsJson = (await brWs.json()) as { collections: Array<{ slug: string }> };
+    assert.ok(unityWsJson.collections.some((c) => c.slug === 'unity_remote_tuning'));
+    assert.ok(brWsJson.collections.some((c) => c.slug === 'br_matches'));
+    assert.ok(brWsJson.collections.some((c) => c.slug === 'weapon_loot_balance'));
+
+    // Battle Royale player sync & ban
+    const brPlayerSync = await apiCall(env, 'POST', '/api/v1/sdk/users/sync', {
+      headers: { 'x-app-id': brApp.app.appUid, 'x-api-key': brApp.initialApiKey },
+      body: { externalUserId: 'br_squad_77', displayName: 'Ghost77', appVersion: '1.0.0' },
+    });
+    assert.equal(brPlayerSync.status, 201);
+    const brUser = (await brPlayerSync.json()) as { user: { id: number } };
+
+    await apiCall(env, 'PATCH', `/api/app-users/${brUser.user.id}`, {
+      cookie: superCookie,
+      body: { status: 'banned' },
+    });
+    const brBannedSync = await apiCall(env, 'POST', '/api/v1/sdk/users/sync', {
+      headers: { 'x-app-id': brApp.app.appUid, 'x-api-key': brApp.initialApiKey },
+      body: { externalUserId: 'br_squad_77' },
+    });
+    assert.equal(brBannedSync.status, 403);
+
+    // 3. SSRF protection rejects private/loopback webhook URLs
+    const ssrfHook = await apiCall(env, 'POST', '/api/webhooks', {
+      cookie: superCookie,
+      body: {
+        appId: unityApp.app.id,
+        name: 'Internal SSRF Probe',
+        targetUrl: 'http://127.0.0.1:8080/internal',
+        events: ['app.error'],
+      },
+    });
+    assert.equal(ssrfHook.status, 400);
+
+    // 4. Cross-app RBAC enforcement on keys, users, exports, flags, ads
+    const rolesRes = await apiCall(env, 'GET', '/api/roles', { cookie: superCookie });
+    const rolesJson = (await rolesRes.json()) as { roles: Array<{ id: number; slug: string }> };
+    const viewerRole = rolesJson.roles.find((r) => r.slug !== 'super_admin')!;
+    const leadRes = await apiCall(env, 'POST', '/api/users', {
+      cookie: superCookie,
+      body: {
+        email: 'br-only@aegis.local',
+        displayName: 'Battle Royale Producer',
+        password: 'ProducerPassword#2026',
+        roleId: viewerRole.id,
+      },
+    });
+    const leadUser = (await leadRes.json()) as { user: { id: number } };
+    await apiCall(env, 'PUT', `/api/apps/${brApp.app.id}/permissions`, {
+      cookie: superCookie,
+      body: { userId: leadUser.user.id, roleScope: 'admin', permissions: ['apps.read', 'apps.manage'] },
+    });
+    const leadLogin = await apiCall(env, 'POST', '/api/auth/login', {
+      body: { email: 'br-only@aegis.local', password: 'ProducerPassword#2026' },
+    });
+    const leadCookie = extractCookieValue(leadLogin);
+
+    // Allowed on Battle Royale app
+    const brFlagOk = await apiCall(env, 'POST', '/api/app/flags', {
+      cookie: leadCookie,
+      body: { appId: brApp.app.id, key: 'sniper_only_mode', name: 'Sniper Mode', isEnabled: true },
+    });
+    assert.equal(brFlagOk.status, 201);
+
+    // Denied on Unity app (403)
+    assert.equal(
+      (await apiCall(env, 'GET', `/api/apps/${unityApp.app.id}/users`, { cookie: leadCookie })).status,
+      403
+    );
+    assert.equal(
+      (await apiCall(env, 'GET', `/api/apps/${unityApp.app.id}/export`, { cookie: leadCookie })).status,
+      403
+    );
+    assert.equal(
+      (
+        await apiCall(env, 'POST', '/api/app/flags', {
+          cookie: leadCookie,
+          body: { appId: unityApp.app.id, key: 'rogue_flag', name: 'Rogue', isEnabled: true },
+        })
+      ).status,
+      403
+    );
+
+    // 5. Notification (app-targeted + all_apps broadcast) & global analytics work cleanly
+    const notifRes = await apiCall(env, 'POST', '/api/notifications', {
+      cookie: superCookie,
+      body: {
+        title: 'Season 2 Live',
+        message: 'Battle Royale Season 2 patch synchronized.',
+        channel: 'in_app',
+        targetType: 'app',
+        appId: brApp.app.id,
+      },
+    });
+    assert.equal(notifRes.status, 201);
+
+    const broadcastAllRes = await apiCall(env, 'POST', '/api/notifications', {
+      cookie: superCookie,
+      body: {
+        title: 'Global Maintenance Notice',
+        message: 'All connected applications verified.',
+        channel: 'in_app',
+        targetType: 'all_apps',
+      },
+    });
+    assert.equal(broadcastAllRes.status, 201);
+
+    const analyticsRes = await apiCall(env, 'GET', '/api/analytics/overview?days=7', { cookie: superCookie });
+    assert.equal(analyticsRes.status, 200);
+  } finally {
+    close();
+  }
+});

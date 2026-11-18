@@ -113,3 +113,40 @@ test('generatePlatformIntegrationSnippets outputs platform-specific SDK code for
   assert.ok(snips.ios.includes('URLSession'));
   assert.ok(snips.curl.includes('X-App-Id: app_demo_01'));
 });
+
+test('inspectAppSpecification separates Unity defaults from Battle Royale defaults and supports Android/Website/iOS/REST API', () => {
+  const unity = inspectAppSpecification({
+    name: 'Unity Strike 3D',
+    platform: 'unity',
+    integrationMode: 'aegis_managed',
+  });
+  const br = inspectAppSpecification({
+    name: 'Apex RoyaleArena',
+    platform: 'game',
+    integrationMode: 'aegis_managed',
+  });
+
+  const unitySlugs = unity.proposedCollections.map((c) => c.slug);
+  const brSlugs = br.proposedCollections.map((c) => c.slug);
+
+  assert.ok(unitySlugs.includes('leaderboard'));
+  assert.ok(unitySlugs.includes('player_inventory'));
+  assert.ok(unitySlugs.includes('unity_remote_tuning'));
+  assert.ok(!unitySlugs.includes('br_matches'));
+
+  assert.ok(brSlugs.includes('player_profiles'));
+  assert.ok(brSlugs.includes('br_matches'));
+  assert.ok(brSlugs.includes('weapon_loot_balance'));
+  assert.ok(!brSlugs.includes('unity_remote_tuning'));
+
+  for (const platform of ['android', 'website', 'ios', 'api']) {
+    const rep = inspectAppSpecification({
+      name: `Sample ${platform}`,
+      platform,
+      integrationMode: 'aegis_managed',
+    });
+    assert.equal(rep.platform, platform);
+    assert.equal(rep.fullControlAvailable, true);
+    assert.ok(rep.proposedCollections.length >= 1);
+  }
+});

@@ -1,6 +1,6 @@
 -- Aegis Enterprise Console — Cloudflare D1 (SQLite) Initial Migration
 -- Preserves all 26 relational tables, foreign keys, and indexes.
-PRAGMA foreign_keys = ON;
+-- Note: Foreign key enforcement is enabled per-connection in runtime (src/db/local-d1.ts & D1).
 
 CREATE TABLE IF NOT EXISTS roles (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

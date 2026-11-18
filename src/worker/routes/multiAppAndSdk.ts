@@ -80,7 +80,25 @@ async function computeHmacSha256(secret: string, body: string): Promise<string> 
 function isValidWebhookUrl(raw: string): boolean {
   try {
     const parsed = new URL(raw);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '::1' ||
+      host === '[::1]' ||
+      host === '0.0.0.0' ||
+      host.endsWith('.localhost') ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal') ||
+      host.startsWith('169.254.') ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+    ) {
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -112,6 +130,16 @@ async function deliverSingleWebhook(
   let responseBody = '';
   let success = false;
   let errorMessage = '';
+
+  if (!isValidWebhookUrl(hook.targetUrl)) {
+    return {
+      success: false,
+      statusCode: 0,
+      durationMs: 0,
+      responseBody: '',
+      errorMessage: 'Blocked non-public or invalid webhook target URL.',
+    };
+  }
 
   try {
     const signature = await computeHmacSha256(hook.signingSecret, bodyStr);
@@ -1012,10 +1040,10 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   });
 
   router.post('/api/apps/:id/keys/:keyId/rotate', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.keys');
+    const appId = Number(ctx.params.id);
+    const permFail = await requireAppAccess(ctx, appId, 'apps.keys');
     if (permFail) return permFail;
 
-    const appId = Number(ctx.params.id);
     const keyId = Number(ctx.params.keyId);
     const existingRows = await ctx.db
       .select()
@@ -1071,10 +1099,10 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   });
 
   router.delete('/api/apps/:id/keys/:keyId', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.keys');
+    const appId = Number(ctx.params.id);
+    const permFail = await requireAppAccess(ctx, appId, 'apps.keys');
     if (permFail) return permFail;
 
-    const appId = Number(ctx.params.id);
     const keyId = Number(ctx.params.keyId);
     const existingRows = await ctx.db
       .select()
@@ -1105,7 +1133,15 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
 
   // ---- PER-APP & COMBINED END-USER MANAGEMENT ----
   const listAppUsersHandler = async (ctx: WorkerContext, forcedAppId?: number) => {
-    const permFail = await requirePermission(ctx, 'apps.read');
+    const appIdScope =
+      forcedAppId ??
+      (ctx.url.searchParams.get('appId') && ctx.url.searchParams.get('appId') !== 'all'
+        ? Number(ctx.url.searchParams.get('appId'))
+        : null);
+    const permFail =
+      appIdScope && Number.isFinite(appIdScope)
+        ? await requireAppAccess(ctx, appIdScope, 'apps.read')
+        : await requirePermission(ctx, 'apps.read');
     if (permFail) return permFail;
 
     const q = queryRecord(ctx);
@@ -1173,10 +1209,10 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   router.get('/api/apps/:id/users', (ctx) => listAppUsersHandler(ctx, Number(ctx.params.id)));
 
   router.post('/api/apps/:id/users', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.manage');
+    const appId = Number(ctx.params.id);
+    const permFail = await requireAppAccess(ctx, appId, 'apps.manage');
     if (permFail) return permFail;
 
-    const appId = Number(ctx.params.id);
     const appRows = await ctx.db.select().from(connectedApps).where(eq(connectedApps.id, appId)).limit(1);
     if (!appRows[0]) return errorResponse(404, 'Connected app not found.');
 
@@ -1224,13 +1260,16 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   });
 
   router.patch('/api/app-users/:userId', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.manage');
-    if (permFail) return permFail;
-
     const userId = Number(ctx.params.userId);
     const existingRows = await ctx.db.select().from(appUsers).where(eq(appUsers.id, userId)).limit(1);
     const existing = existingRows[0];
-    if (!existing) return errorResponse(404, 'App user not found.');
+    if (!existing) {
+      const permFail = await requirePermission(ctx, 'apps.manage');
+      if (permFail) return permFail;
+      return errorResponse(404, 'App user not found.');
+    }
+    const permFail = await requireAppAccess(ctx, existing.appId, 'apps.manage');
+    if (permFail) return permFail;
 
     const body = await readJsonBody<{
       status?: string;
@@ -1290,22 +1329,31 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   });
 
   router.delete('/api/app-users/:userId', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.manage');
-    if (permFail) return permFail;
-
     const userId = Number(ctx.params.userId);
     const existingRows = await ctx.db.select().from(appUsers).where(eq(appUsers.id, userId)).limit(1);
-    if (!existingRows[0]) return errorResponse(404, 'App user not found.');
+    if (!existingRows[0]) {
+      const permFail = await requirePermission(ctx, 'apps.manage');
+      if (permFail) return permFail;
+      return errorResponse(404, 'App user not found.');
+    }
+    const permFail = await requireAppAccess(ctx, existingRows[0].appId, 'apps.manage');
+    if (permFail) return permFail;
 
     await ctx.db.delete(appUsers).where(eq(appUsers.id, userId));
     return jsonResponse({ deleted: true });
   });
 
   router.get('/api/app-users/:userId/activity', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.read');
+    const userId = Number(ctx.params.userId);
+    const existingRows = await ctx.db.select().from(appUsers).where(eq(appUsers.id, userId)).limit(1);
+    if (!existingRows[0]) {
+      const permFail = await requirePermission(ctx, 'apps.read');
+      if (permFail) return permFail;
+      return errorResponse(404, 'App user not found.');
+    }
+    const permFail = await requireAppAccess(ctx, existingRows[0].appId, 'apps.read');
     if (permFail) return permFail;
 
-    const userId = Number(ctx.params.userId);
     const events = await ctx.db
       .select()
       .from(appEvents)
@@ -1318,10 +1366,10 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
 
   // ---- APP EVENTS, HEALTH & ERROR MONITORING ----
   router.get('/api/apps/:id/events', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.read');
+    const appId = Number(ctx.params.id);
+    const permFail = await requireAppAccess(ctx, appId, 'apps.read');
     if (permFail) return permFail;
 
-    const appId = Number(ctx.params.id);
     const severity = sanitizeText(ctx.url.searchParams.get('severity') || 'all', 20);
     const conditions: SQL[] = [eq(appEvents.appId, appId)];
     if (severity !== 'all') {
@@ -1397,10 +1445,10 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
 
   // ---- ISOLATED PER-APP EXPORT (CSV OR JSON) ----
   router.get('/api/apps/:id/export', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.read');
+    const appId = Number(ctx.params.id);
+    const permFail = await requireAppAccess(ctx, appId, 'apps.read');
     if (permFail) return permFail;
 
-    const appId = Number(ctx.params.id);
     const format = sanitizeText(ctx.url.searchParams.get('format') || 'json', 10).toLowerCase();
 
     const appRows = await ctx.db.select().from(connectedApps).where(eq(connectedApps.id, appId)).limit(1);
@@ -1516,9 +1564,6 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   });
 
   router.post('/api/webhooks', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'webhooks.manage');
-    if (permFail) return permFail;
-
     const body = await readJsonBody<{
       appId?: number | null;
       name?: string;
@@ -1526,10 +1571,17 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       events?: string[];
     }>(ctx.request);
 
+    const scopedAppId = body.appId ? Number(body.appId) : null;
+    const permFail =
+      scopedAppId && Number.isFinite(scopedAppId)
+        ? await requireAppAccess(ctx, scopedAppId, ['webhooks.manage', 'apps.manage'])
+        : await requirePermission(ctx, 'webhooks.manage');
+    if (permFail) return permFail;
+
     const name = sanitizeText(body.name, 100);
     const targetUrl = sanitizeText(body.targetUrl, 400);
     if (!name || !isValidWebhookUrl(targetUrl)) {
-      return errorResponse(400, 'Webhook name and a valid http/https target URL are required.');
+      return errorResponse(400, 'Webhook name and a valid public http/https target URL are required.');
     }
 
     const events = Array.isArray(body.events) && body.events.length > 0
@@ -1540,7 +1592,7 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     const created = await ctx.db
       .insert(webhooks)
       .values({
-        appId: body.appId ? Number(body.appId) : null,
+        appId: scopedAppId,
         name,
         targetUrl,
         events,
@@ -1566,12 +1618,17 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   });
 
   router.patch('/api/webhooks/:id', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'webhooks.manage');
-    if (permFail) return permFail;
-
     const id = Number(ctx.params.id);
     const existing = await ctx.db.select().from(webhooks).where(eq(webhooks.id, id)).limit(1);
-    if (!existing[0]) return errorResponse(404, 'Webhook not found.');
+    if (!existing[0]) {
+      const permFail = await requirePermission(ctx, 'webhooks.manage');
+      if (permFail) return permFail;
+      return errorResponse(404, 'Webhook not found.');
+    }
+    const permFail = existing[0].appId
+      ? await requireAppAccess(ctx, existing[0].appId, ['webhooks.manage', 'apps.manage'])
+      : await requirePermission(ctx, 'webhooks.manage');
+    if (permFail) return permFail;
 
     const body = await readJsonBody<{
       isActive?: boolean;
@@ -1580,7 +1637,7 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     }>(ctx.request);
 
     if (body.targetUrl !== undefined && !isValidWebhookUrl(body.targetUrl)) {
-      return errorResponse(400, 'Invalid target URL.');
+      return errorResponse(400, 'Invalid or non-public target URL.');
     }
 
     const updated = await ctx.db
@@ -1601,22 +1658,35 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   });
 
   router.delete('/api/webhooks/:id', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'webhooks.manage');
+    const id = Number(ctx.params.id);
+    const existing = await ctx.db.select().from(webhooks).where(eq(webhooks.id, id)).limit(1);
+    if (!existing[0]) {
+      const permFail = await requirePermission(ctx, 'webhooks.manage');
+      if (permFail) return permFail;
+      return errorResponse(404, 'Webhook not found.');
+    }
+    const permFail = existing[0].appId
+      ? await requireAppAccess(ctx, existing[0].appId, ['webhooks.manage', 'apps.manage'])
+      : await requirePermission(ctx, 'webhooks.manage');
     if (permFail) return permFail;
 
-    const id = Number(ctx.params.id);
     await ctx.db.delete(webhooks).where(eq(webhooks.id, id));
     return jsonResponse({ deleted: true });
   });
 
   router.post('/api/webhooks/:id/test', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'webhooks.manage');
-    if (permFail) return permFail;
-
     const id = Number(ctx.params.id);
     const rows = await ctx.db.select().from(webhooks).where(eq(webhooks.id, id)).limit(1);
     const hook = rows[0];
-    if (!hook) return errorResponse(404, 'Webhook not found.');
+    if (!hook) {
+      const permFail = await requirePermission(ctx, 'webhooks.manage');
+      if (permFail) return permFail;
+      return errorResponse(404, 'Webhook not found.');
+    }
+    const permFail = hook.appId
+      ? await requireAppAccess(ctx, hook.appId, ['webhooks.manage', 'apps.manage'])
+      : await requirePermission(ctx, 'webhooks.manage');
+    if (permFail) return permFail;
 
     let appUid = 'global';
     if (hook.appId) {
@@ -1640,10 +1710,13 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   });
 
   router.get('/api/webhooks/:id/deliveries', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, ['webhooks.manage', 'apps.read']);
+    const id = Number(ctx.params.id);
+    const rows = await ctx.db.select().from(webhooks).where(eq(webhooks.id, id)).limit(1);
+    const permFail = rows[0]?.appId
+      ? await requireAppAccess(ctx, rows[0].appId, ['webhooks.manage', 'apps.read'])
+      : await requirePermission(ctx, ['webhooks.manage', 'apps.read']);
     if (permFail) return permFail;
 
-    const id = Number(ctx.params.id);
     const deliveries = await ctx.db
       .select()
       .from(webhookDeliveries)

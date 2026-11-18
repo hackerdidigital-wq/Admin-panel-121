@@ -682,7 +682,88 @@ export const AppsCenterPage: React.FC<{
             onSubmit={handleConnectApp}
             className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-6 dark:border-slate-800 dark:bg-slate-900"
           >
-            <h2 className="font-display text-sm font-semibold">01. Register & Inspect Application</h2>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="font-display text-sm font-semibold">01. Register & Inspect Application</h2>
+              <span className="text-[11px] text-slate-500">1-Click Blueprints</span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {[
+                {
+                  id: 'shayari',
+                  label: 'Shayari App',
+                  name: 'ShayariVerse App',
+                  platform: 'android',
+                  pkg: 'com.aegis.shayariverse',
+                  models:
+                    'shayari(title:text, shayari_text:text, author:text, category:text, published:boolean); shayari_categories(name:text, slug:text, active:boolean)',
+                },
+                {
+                  id: 'unity',
+                  label: 'Unity 3D Game',
+                  name: 'Unity Strike 3D',
+                  platform: 'unity',
+                  pkg: 'com.studio.unitystrike',
+                  models: '',
+                },
+                {
+                  id: 'br',
+                  label: 'Battle Royale Game',
+                  name: 'Apex RoyaleArena',
+                  platform: 'game',
+                  pkg: 'com.studio.apexroyale',
+                  models: '',
+                },
+                {
+                  id: 'android',
+                  label: 'Android App',
+                  name: 'Atlas Android App',
+                  platform: 'android',
+                  pkg: 'com.studio.atlasapp',
+                  models: '',
+                },
+                {
+                  id: 'website',
+                  label: 'Website / CMS',
+                  name: 'Nova Web Portal',
+                  platform: 'website',
+                  pkg: 'https://nova.example.com',
+                  models: '',
+                },
+                {
+                  id: 'ios',
+                  label: 'iOS App',
+                  name: 'Pulse iOS App',
+                  platform: 'ios',
+                  pkg: 'com.studio.pulseios',
+                  models: '',
+                },
+                {
+                  id: 'api',
+                  label: 'REST API',
+                  name: 'Core Data API',
+                  platform: 'api',
+                  pkg: 'https://api.example.com',
+                  models: '',
+                },
+              ].map((bp) => (
+                <button
+                  key={bp.id}
+                  type="button"
+                  onClick={() => {
+                    setNewName(bp.name);
+                    setNewPlatform(bp.platform);
+                    setNewPkg(bp.pkg);
+                    setModelsText(bp.models);
+                    setIntegrationMode('aegis_managed');
+                    setInspectReport(null);
+                    setInspectSnippets(null);
+                  }}
+                  className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-blue-50 hover:border-blue-300 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300 dark:hover:bg-blue-950/40"
+                >
+                  {bp.label}
+                </button>
+              ))}
+            </div>
             <div className="grid gap-3 sm:grid-cols-2 text-xs">
               <div>
                 <label htmlFor="connect-app-name" className="block font-medium">
@@ -709,7 +790,7 @@ export const AppsCenterPage: React.FC<{
                 >
                   <option value="android">Android App (Kotlin/Java)</option>
                   <option value="unity">Unity Game (C# SDK)</option>
-                  <option value="game">Mobile / Web Game</option>
+                  <option value="game">Battle Royale / Multiplayer Game</option>
                   <option value="website">Website / Web App</option>
                   <option value="ios">iOS App (Swift)</option>
                   <option value="api">REST API Service</option>
