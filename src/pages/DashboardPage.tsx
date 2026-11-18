@@ -22,6 +22,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { apiRequest } from '../lib/api';
+import { useAppScope } from '../contexts/AppScopeContext';
 import { useRealtime } from '../contexts/RealtimeContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../components/common/Toast';
@@ -69,6 +70,16 @@ interface OverviewResponse {
     operationsByDay: Array<{ day: string; success_count: number; error_count: number }>;
     signupsByDay: Array<{ day: string; signups: number }>;
   };
+  multiApp?: {
+    totalApps: number;
+    connectedApps: number;
+    maintenanceApps: number;
+    totalAppUsers: number;
+    activeAppUsers: number;
+    bannedAppUsers: number;
+    appErrors24h: number;
+    adRevenueCents?: number;
+  };
   layout: { order?: string[]; hidden?: string[] } | null;
 }
 
@@ -79,6 +90,7 @@ export const DashboardPage: React.FC<{
   onNavigate: (viewId: string) => void;
 }> = ({ mode = 'dashboard', onNavigate }) => {
   const { hasPerm } = useAuth();
+  const { selectedAppId, selectedApp, setSelectedAppId } = useAppScope();
   const { connected, onlineUserIds, recentEvents } = useRealtime();
   const { pushToast } = useToast();
   const [data, setData] = useState<OverviewResponse | null>(null);
@@ -93,7 +105,8 @@ export const DashboardPage: React.FC<{
     setLoading(true);
     setError(null);
     try {
-      const res = await apiRequest<OverviewResponse>('/dashboard/overview');
+      const qs = selectedAppId !== 'all' ? `?appId=${selectedAppId}` : '';
+      const res = await apiRequest<OverviewResponse>(`/dashboard/overview${qs}`);
       setData(res);
       if (res.layout?.order?.length) setWidgetOrder(res.layout.order);
       if (res.layout?.hidden) setHiddenWidgets(res.layout.hidden);
@@ -102,7 +115,7 @@ export const DashboardPage: React.FC<{
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedAppId]);
 
   useEffect(() => {
     void loadData();
@@ -682,14 +695,25 @@ export const DashboardPage: React.FC<{
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-xl font-semibold text-slate-900 dark:text-slate-100">
-            Operational Dashboard
+            Operational Dashboard {selectedApp ? `· ${selectedApp.name}` : ''}
           </h1>
           <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-            Live platform metrics computed directly from Cloudflare D1 SQLite and active session presence.
+            {selectedApp
+              ? `Scoped to ${selectedApp.name} (${selectedApp.platform} · v${selectedApp.currentVersion}).`
+              : 'Combined telemetry computed from Cloudflare D1 SQLite across all connected apps and admins.'}
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {selectedApp && (
+            <button
+              type="button"
+              onClick={() => setSelectedAppId('all')}
+              className="inline-flex h-9 items-center rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+            >
+              Show All Apps
+            </button>
+          )}
           <button
             type="button"
             onClick={() => void loadData()}
@@ -721,6 +745,61 @@ export const DashboardPage: React.FC<{
             ))}
         </div>
       </div>
+
+      {data.multiApp && (
+        <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <button
+            type="button"
+            onClick={() => onNavigate('apps-directory')}
+            className="rounded-xl border border-slate-200 bg-white p-4 text-left hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700"
+          >
+            <p className="text-xs text-slate-500">Connected Apps</p>
+            <p className="mt-1 font-display text-2xl font-semibold tabular-nums">
+              {data.multiApp.connectedApps} / {data.multiApp.totalApps}
+            </p>
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              {data.multiApp.maintenanceApps} in maintenance
+            </p>
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigate('apps-users')}
+            className="rounded-xl border border-slate-200 bg-white p-4 text-left hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700"
+          >
+            <p className="text-xs text-slate-500">App End-Users</p>
+            <p className="mt-1 font-display text-2xl font-semibold tabular-nums">
+              {(data.multiApp.totalAppUsers ?? 0).toLocaleString()}
+            </p>
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              {data.multiApp.bannedAppUsers ?? 0} banned
+            </p>
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigate('apps-health')}
+            className="rounded-xl border border-slate-200 bg-white p-4 text-left hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700"
+          >
+            <p className="text-xs text-slate-500">SDK Errors (24h)</p>
+            <p className="mt-1 font-display text-2xl font-semibold tabular-nums">
+              {data.multiApp.appErrors24h ?? 0}
+            </p>
+            <p className="mt-0.5 text-[11px] text-slate-500">View app error monitor</p>
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigate('apps-connect')}
+            className="rounded-xl border border-slate-200 bg-white p-4 text-left hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700"
+          >
+            <p className="text-xs text-slate-500">Revenue Volume</p>
+            <p className="mt-1 font-display text-2xl font-semibold tabular-nums">
+              ${(data.kpis.revenueCents / 100).toFixed(2)}
+            </p>
+            <p className="mt-0.5 text-[11px] text-blue-600 dark:text-blue-400">
+              Connect new app & SDK
+            </p>
+          </button>
+        </section>
+      )}
 
       {widgetOrder.map((widgetId) => renderWidget(widgetId))}
     </div>

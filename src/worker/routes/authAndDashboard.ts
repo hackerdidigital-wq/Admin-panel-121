@@ -1,8 +1,12 @@
 import { and, asc, desc, eq, gte, isNotNull, sql } from 'drizzle-orm';
 import {
+  adConfigs,
   apiLogs,
+  appEvents,
+  appUsers,
   auditLogs,
   backgroundJobs,
+  connectedApps,
   contentItems,
   notifications,
   roles,
@@ -751,7 +755,7 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
     });
   });
 
-  // Main Operational Dashboard Overview (100% SQLite / D1 real records)
+  // Main Operational Dashboard Overview (100% SQLite / D1 real records, optional ?appId= scoping)
   router.get('/api/dashboard/overview', async (ctx: WorkerContext) => {
     const permFail = await requirePermission(ctx, 'dashboard.read');
     if (permFail) return permFail;
@@ -760,10 +764,14 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
     await ctx.env.DB.prepare('SELECT 1 AS ok').first();
     const dbLatencyMs = Date.now() - start;
 
+    const rawAppId = ctx.url.searchParams.get('appId');
+    const scopedAppId = rawAppId && rawAppId !== 'all' && Number.isFinite(Number(rawAppId)) ? Number(rawAppId) : null;
+
     const now = new Date();
     const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
     const twoMinsAgo = new Date(Date.now() - 2 * 60_000);
     const fourteenDaysAgo = new Date(Date.now() - 14 * 86_400_000);
+    const oneDayAgo = new Date(Date.now() - 86_400_000);
 
     const [
       allUsersRows,
@@ -774,6 +782,10 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
       recentAudit,
       recentAlerts,
       layoutRows,
+      appsRows,
+      appUsersRows,
+      adRows,
+      appErrorRows,
     ] = await Promise.all([
       ctx.db
         .select({
@@ -785,10 +797,12 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
         .from(users),
       ctx.db
         .select({
+          appId: transactions.appId,
           status: transactions.status,
           amountCents: transactions.amountCents,
         })
-        .from(transactions),
+        .from(transactions)
+        .where(scopedAppId ? eq(transactions.appId, scopedAppId) : undefined),
       ctx.db
         .select({
           statusCode: apiLogs.statusCode,
@@ -796,7 +810,11 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
           createdAt: apiLogs.createdAt,
         })
         .from(apiLogs)
-        .where(gte(apiLogs.createdAt, fourteenDaysAgo)),
+        .where(
+          scopedAppId
+            ? and(gte(apiLogs.createdAt, fourteenDaysAgo), eq(apiLogs.appId, scopedAppId))
+            : gte(apiLogs.createdAt, fourteenDaysAgo)
+        ),
       ctx.db
         .select({
           status: backgroundJobs.status,
@@ -806,7 +824,8 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
         .select({
           status: supportTickets.status,
         })
-        .from(supportTickets),
+        .from(supportTickets)
+        .where(scopedAppId ? eq(supportTickets.appId, scopedAppId) : undefined),
       ctx.db
         .select()
         .from(auditLogs)
@@ -830,6 +849,40 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
           )
         )
         .limit(1),
+      ctx.db.select().from(connectedApps).orderBy(desc(connectedApps.updatedAt)),
+      ctx.db
+        .select({
+          id: appUsers.id,
+          appId: appUsers.appId,
+          status: appUsers.status,
+          lastActiveAt: appUsers.lastActiveAt,
+          createdAt: appUsers.createdAt,
+        })
+        .from(appUsers)
+        .where(scopedAppId ? eq(appUsers.appId, scopedAppId) : undefined),
+      ctx.db
+        .select({
+          revenueCents: adConfigs.revenueCents,
+          impressions: adConfigs.impressions,
+          clicks: adConfigs.clicks,
+        })
+        .from(adConfigs)
+        .where(scopedAppId ? eq(adConfigs.appId, scopedAppId) : undefined),
+      ctx.db
+        .select({ id: appEvents.id })
+        .from(appEvents)
+        .where(
+          scopedAppId
+            ? and(
+                eq(appEvents.appId, scopedAppId),
+                gte(appEvents.createdAt, oneDayAgo),
+                sql`${appEvents.severity} IN ('error', 'critical')`
+              )
+            : and(
+                gte(appEvents.createdAt, oneDayAgo),
+                sql`${appEvents.severity} IN ('error', 'critical')`
+              )
+        ),
     ]);
 
     const totalUsers = allUsersRows.length;
@@ -876,6 +929,12 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
       if (!day) continue;
       signupMap.set(day, (signupMap.get(day) ?? 0) + 1);
     }
+    for (const au of appUsersRows) {
+      if (new Date(au.createdAt).getTime() < fourteenDaysAgo.getTime()) continue;
+      const day = toDayKey(au.createdAt);
+      if (!day) continue;
+      signupMap.set(day, (signupMap.get(day) ?? 0) + 1);
+    }
 
     const activeSessRows = await ctx.db
       .select({ count: sql<number>`cast(count(*) as integer)` })
@@ -890,7 +949,10 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
         ? Math.floor(process.uptime())
         : 0;
 
+    const adRevenueCents = adRows.reduce((s, a) => s + a.revenueCents, 0);
+
     return jsonResponse({
+      scopedAppId,
       kpis: {
         totalUsers,
         activeUsers,
@@ -903,6 +965,27 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
         successfulOperations: successfulOps,
         failedOperations: failedOps,
         openTickets,
+      },
+      multiApp: {
+        totalApps: appsRows.length,
+        connectedApps: appsRows.filter((a) => a.status === 'connected').length,
+        maintenanceApps: appsRows.filter((a) => a.status === 'maintenance').length,
+        totalAppUsers: appUsersRows.length,
+        activeAppUsers: appUsersRows.filter((u) => u.status === 'active').length,
+        bannedAppUsers: appUsersRows.filter((u) => u.status === 'banned').length,
+        appErrors24h: appErrorRows.length,
+        adRevenueCents,
+        appsSummary: appsRows.slice(0, 8).map((a) => ({
+          id: a.id,
+          appUid: a.appUid,
+          name: a.name,
+          platform: a.platform,
+          status: a.status,
+          healthStatus: a.healthStatus,
+          currentVersion: a.currentVersion,
+          lastLatencyMs: a.lastLatencyMs,
+          errorCount24h: a.errorCount24h,
+        })),
       },
       health: {
         system: {
@@ -1016,6 +1099,56 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
       subtitle: string;
       targetView: string;
     }> = [];
+
+    if ((type === 'all' || type === 'apps') && hasPermission(admin.permissions, 'apps.read')) {
+      const appMatches = await ctx.db
+        .select({
+          id: connectedApps.id,
+          name: connectedApps.name,
+          appUid: connectedApps.appUid,
+          platform: connectedApps.platform,
+          status: connectedApps.status,
+        })
+        .from(connectedApps)
+        .where(
+          sql`lower(${connectedApps.name}) LIKE ${pattern} OR lower(${connectedApps.appUid}) LIKE ${pattern} OR lower(${connectedApps.packageOrDomain}) LIKE ${pattern}`
+        )
+        .limit(6);
+      for (const a of appMatches) {
+        results.push({
+          id: `app-${a.id}`,
+          entityId: a.id,
+          type: 'app',
+          title: a.name,
+          subtitle: `${a.platform} · ${a.appUid} · ${a.status}`,
+          targetView: 'apps-directory',
+        });
+      }
+
+      const appUserMatches = await ctx.db
+        .select({
+          id: appUsers.id,
+          externalUserId: appUsers.externalUserId,
+          email: appUsers.email,
+          displayName: appUsers.displayName,
+          status: appUsers.status,
+        })
+        .from(appUsers)
+        .where(
+          sql`lower(${appUsers.externalUserId}) LIKE ${pattern} OR lower(${appUsers.email}) LIKE ${pattern} OR lower(${appUsers.displayName}) LIKE ${pattern}`
+        )
+        .limit(5);
+      for (const au of appUserMatches) {
+        results.push({
+          id: `appuser-${au.id}`,
+          entityId: au.id,
+          type: 'app_user',
+          title: au.displayName || au.email || au.externalUserId,
+          subtitle: `App User · ${au.externalUserId} · ${au.status}`,
+          targetView: 'apps-users',
+        });
+      }
+    }
 
     if ((type === 'all' || type === 'users') && hasPermission(admin.permissions, 'users.read')) {
       const rows = await ctx.db

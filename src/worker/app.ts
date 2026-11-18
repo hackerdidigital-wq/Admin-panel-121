@@ -5,6 +5,7 @@ import { apiLogs, systemSettings } from '../db/schema.ts';
 import { SlidingWindowLimiter } from '../lib/security.ts';
 import {
   applyCorsHeaders,
+  applySdkCorsHeaders,
   errorResponse,
   getClientIp,
   isAllowedCorsOrigin,
@@ -16,6 +17,7 @@ import { registerAuthAndDashboardRoutes } from './routes/authAndDashboard.ts';
 import { registerCommerceAndAppRoutes } from './routes/commerceAndApp.ts';
 import { registerContentAndCommsRoutes } from './routes/contentAndComms.ts';
 import { registerDevDbFilesAiRoutes } from './routes/devDbFilesAi.ts';
+import { registerMultiAppAndSdkRoutes } from './routes/multiAppAndSdk.ts';
 import { registerOpsAndSecurityRoutes } from './routes/opsAndSecurity.ts';
 import { registerUsersAndRolesRoutes } from './routes/usersAndRoles.ts';
 import type { WorkerContext, WorkerEnv, WorkerExecutionContext } from './types.ts';
@@ -27,6 +29,7 @@ let lastLimitSync = 0;
 function createRouter(): WorkerRouter {
   const router = new WorkerRouter();
   registerAuthAndDashboardRoutes(router);
+  registerMultiAppAndSdkRoutes(router);
   registerUsersAndRolesRoutes(router);
   registerContentAndCommsRoutes(router);
   registerCommerceAndAppRoutes(router);
@@ -37,6 +40,14 @@ function createRouter(): WorkerRouter {
 
 const router = createRouter();
 
+function decorateResponse(request: Request, response: Response, env: WorkerEnv, isSdkRequest: boolean): Response {
+  return withSecurityHeaders(
+    isSdkRequest
+      ? applySdkCorsHeaders(response)
+      : applyCorsHeaders(request, response, env?.APP_URL)
+  );
+}
+
 export async function handleApiRequest(
   request: Request,
   env: WorkerEnv,
@@ -45,9 +56,13 @@ export async function handleApiRequest(
   const url = new URL(request.url);
   const clientIp = getClientIp(request);
   const userAgent = request.headers.get('user-agent') || '';
+  const isSdkRequest = url.pathname.startsWith('/api/v1/sdk/');
 
-  // Strict CORS preflight handling
+  // CORS preflight handling (SDK endpoints use API key auth without cookies)
   if (request.method.toUpperCase() === 'OPTIONS') {
+    if (isSdkRequest) {
+      return withSecurityHeaders(applySdkCorsHeaders(new Response(null, { status: 204 })));
+    }
     const allowedOrigin = isAllowedCorsOrigin(request, env.APP_URL);
     if (request.headers.get('origin') && !allowedOrigin) {
       return withSecurityHeaders(errorResponse(403, 'Forbidden: Disallowed CORS origin.'));
@@ -57,22 +72,23 @@ export async function handleApiRequest(
     );
   }
 
-  // CSRF check on mutating requests
-  const csrfFail = verifyCsrfOrigin(request, env.APP_URL);
-  if (csrfFail) {
-    return withSecurityHeaders(applyCorsHeaders(request, csrfFail, env.APP_URL));
+  // Strict CSRF Origin/Double-submit enforcement on all Admin browser routes (SDK uses stateless API keys)
+  if (!isSdkRequest) {
+    const csrfFail = verifyCsrfOrigin(request, env.APP_URL);
+    if (csrfFail) {
+      return decorateResponse(request, csrfFail, env, false);
+    }
   }
 
   if (!env?.DB) {
-    return withSecurityHeaders(
-      applyCorsHeaders(
-        request,
-        errorResponse(
-          503,
-          'Cloudflare D1 database binding "DB" is not configured. Check wrangler.toml [[d1_databases]] binding.'
-        ),
-        env?.APP_URL
-      )
+    return decorateResponse(
+      request,
+      errorResponse(
+        503,
+        'Cloudflare D1 database binding "DB" is not configured. Check wrangler.toml [[d1_databases]] binding.'
+      ),
+      env,
+      isSdkRequest
     );
   }
 
@@ -106,20 +122,12 @@ export async function handleApiRequest(
     const headers = new Headers(resp.headers);
     headers.set('X-RateLimit-Limit', String(configuredLimitPerMin));
     headers.set('X-RateLimit-Remaining', '0');
-    return withSecurityHeaders(
-      applyCorsHeaders(
-        request,
-        new Response(resp.body, { status: resp.status, headers }),
-        env.APP_URL
-      )
-    );
+    return decorateResponse(request, new Response(resp.body, { status: resp.status, headers }), env, isSdkRequest);
   }
 
   const matched = router.match(request.method, url.pathname);
   if (!matched) {
-    return withSecurityHeaders(
-      applyCorsHeaders(request, errorResponse(404, 'API endpoint not found.'), env.APP_URL)
-    );
+    return decorateResponse(request, errorResponse(404, 'API endpoint not found.'), env, isSdkRequest);
   }
 
   const ctx: WorkerContext = {
@@ -130,6 +138,8 @@ export async function handleApiRequest(
     db,
     clientIp,
     userAgent,
+    executionCtx,
+    sdkAppId: null,
   };
 
   const startedAt = Date.now();
@@ -145,9 +155,13 @@ export async function handleApiRequest(
 
   // Record API telemetry asynchronously using ExecutionContext.waitUntil on Cloudflare Workers
   if (url.pathname !== '/api/realtime/snapshot' && isSchemaBootstrapped(env.DB)) {
+    const appIdQuery = Number(url.searchParams.get('appId'));
+    const loggedAppId =
+      ctx.sdkAppId ?? (Number.isFinite(appIdQuery) && appIdQuery > 0 ? appIdQuery : null);
     const telemetryPromise = db
       .insert(apiLogs)
       .values({
+        appId: loggedAppId,
         method: request.method.slice(0, 10),
         path: url.pathname.slice(0, 200),
         statusCode: response.status,
@@ -169,15 +183,14 @@ export async function handleApiRequest(
   headers.set('X-RateLimit-Limit', String(configuredLimitPerMin));
   headers.set('X-RateLimit-Remaining', String(rateResult.remaining));
 
-  return withSecurityHeaders(
-    applyCorsHeaders(
-      request,
-      new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers,
-      }),
-      env.APP_URL
-    )
+  return decorateResponse(
+    request,
+    new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    }),
+    env,
+    isSdkRequest
   );
 }

@@ -21,7 +21,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectView,
 }) => {
   const { hasPerm } = useAuth();
-  const [expandedModules, setExpandedModules] = useState<string[]>(['overview', 'users']);
+  const [expandedModules, setExpandedModules] = useState<string[]>(['overview', 'apps']);
 
   const toggleModule = (modId: string) => {
     setExpandedModules((prev) =>

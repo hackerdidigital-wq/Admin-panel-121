@@ -71,4 +71,6 @@ export interface WorkerContext {
   clientIp: string;
   userAgent: string;
   adminUser?: AuthenticatedAdmin;
+  executionCtx?: WorkerExecutionContext;
+  sdkAppId?: number | null;
 }

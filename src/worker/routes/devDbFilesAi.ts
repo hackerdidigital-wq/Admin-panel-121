@@ -1,4 +1,5 @@
 import { desc, eq, sql } from 'drizzle-orm';
+import type { AegisDatabase } from '../../db/index.ts';
 import {
   apiLogs,
   auditLogs,
@@ -14,7 +15,7 @@ import { writeAuditLog } from '../audit.ts';
 import { requirePermission } from '../auth.ts';
 import { errorResponse, jsonResponse, readJsonBody } from '../http.ts';
 import type { WorkerRouter } from '../router.ts';
-import type { WorkerContext } from '../types.ts';
+import type { D1Database, WorkerContext } from '../types.ts';
 
 const ALLOWED_TABLES = new Set([
   'roles',
@@ -24,6 +25,13 @@ const ALLOWED_TABLES = new Set([
   'user_permission_overrides',
   'user_sessions',
   'user_notes',
+  'connected_apps',
+  'app_api_keys',
+  'app_users',
+  'app_events',
+  'webhooks',
+  'webhook_deliveries',
+  'user_app_permissions',
   'categories',
   'content_items',
   'content_versions',
@@ -44,6 +52,216 @@ const ALLOWED_TABLES = new Set([
   'backups',
   'saved_views',
 ]);
+
+const BACKUP_TABLES = [
+  'roles',
+  'connected_apps',
+  'app_users',
+  'app_events',
+  'webhooks',
+  'user_app_permissions',
+  'categories',
+  'content_items',
+  'notification_templates',
+  'notifications',
+  'transactions',
+  'ad_configs',
+  'support_tickets',
+  'system_settings',
+  'feature_flags',
+  'app_releases',
+] as const;
+
+const APP_SCOPED_BACKUP_TABLES = new Set([
+  'app_users',
+  'app_events',
+  'webhooks',
+  'user_app_permissions',
+  'content_items',
+  'notifications',
+  'transactions',
+  'ad_configs',
+  'support_tickets',
+  'feature_flags',
+  'app_releases',
+]);
+
+const RESTORE_DELETE_ORDER = [
+  'app_events',
+  'app_users',
+  'ad_configs',
+  'transactions',
+  'notifications',
+  'support_tickets',
+  'app_releases',
+  'feature_flags',
+  'content_items',
+  'user_app_permissions',
+] as const;
+
+const RESTORE_INSERT_ORDER = [
+  'roles',
+  'connected_apps',
+  'webhooks',
+  'user_app_permissions',
+  'app_users',
+  'app_events',
+  'categories',
+  'content_items',
+  'notification_templates',
+  'notifications',
+  'transactions',
+  'ad_configs',
+  'support_tickets',
+  'system_settings',
+  'feature_flags',
+  'app_releases',
+] as const;
+
+export async function createFullBackupSnapshot(
+  db: AegisDatabase,
+  d1: D1Database,
+  actorId: number | null,
+  backupType: 'manual' | 'scheduled' | 'export' = 'manual',
+  appId: number | null = null
+): Promise<{
+  id: number;
+  filename: string;
+  sizeBytes: number;
+  checksumSha256: string;
+  rowCount: number;
+}> {
+  const snapshotData: Record<string, unknown[]> = {};
+  const tablesIncluded: string[] = [];
+  let totalRows = 0;
+
+  for (const tbl of BACKUP_TABLES) {
+    let rows: Record<string, unknown>[];
+    if (appId !== null && tbl === 'connected_apps') {
+      const r = await d1.prepare(`SELECT * FROM "connected_apps" WHERE id = ?`).bind(appId).all<Record<string, unknown>>();
+      rows = r.results;
+    } else if (appId !== null && APP_SCOPED_BACKUP_TABLES.has(tbl)) {
+      const r = await d1.prepare(`SELECT * FROM "${tbl}" WHERE app_id = ?`).bind(appId).all<Record<string, unknown>>();
+      rows = r.results;
+    } else if (appId !== null && (tbl === 'roles' || tbl === 'system_settings' || tbl === 'categories' || tbl === 'notification_templates')) {
+      continue;
+    } else {
+      const r = await d1.prepare(`SELECT * FROM "${tbl}"`).all<Record<string, unknown>>();
+      rows = r.results;
+    }
+    snapshotData[tbl] = rows;
+    tablesIncluded.push(tbl);
+    totalRows += rows.length;
+  }
+
+  const jsonString = JSON.stringify(snapshotData);
+  const checksumSha256 = await computeSha256(jsonString);
+  const sizeBytes = new TextEncoder().encode(jsonString).byteLength;
+  const scopeLabel = appId ? `app-${appId}` : 'multi-app';
+  const filename = `aegis-d1-${scopeLabel}-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+
+  const created = await db
+    .insert(backups)
+    .values({
+      appId,
+      filename,
+      type: backupType,
+      status: 'verified',
+      sizeBytes,
+      checksumSha256,
+      tablesIncluded,
+      rowCount: totalRows,
+      snapshotData,
+      verifiedAt: new Date(),
+      createdBy: actorId,
+    })
+    .returning();
+
+  return {
+    id: created[0].id,
+    filename,
+    sizeBytes,
+    checksumSha256,
+    rowCount: totalRows,
+  };
+}
+
+async function restoreSnapshotDataToD1(
+  d1: D1Database,
+  snapshotData: Record<string, unknown>,
+  mode: 'merge' | 'replace',
+  scopedAppId: number | null
+): Promise<{ restoredTables: string[]; restoredRows: number }> {
+  const restoredTables: string[] = [];
+  let restoredRows = 0;
+
+  if (mode === 'replace') {
+    for (const tbl of RESTORE_DELETE_ORDER) {
+      if (!Array.isArray(snapshotData[tbl])) continue;
+      if (scopedAppId !== null && APP_SCOPED_BACKUP_TABLES.has(tbl)) {
+        await d1.prepare(`DELETE FROM "${tbl}" WHERE app_id = ?`).bind(scopedAppId).run();
+      } else if (scopedAppId === null) {
+        await d1.prepare(`DELETE FROM "${tbl}"`).run();
+      }
+    }
+  }
+
+  for (const tbl of RESTORE_INSERT_ORDER) {
+    const rawRows = snapshotData[tbl];
+    if (!Array.isArray(rawRows) || rawRows.length === 0) continue;
+
+    const colInfo = await d1
+      .prepare(`SELECT name FROM pragma_table_info('${tbl}')`)
+      .all<{ name: string }>();
+    const validCols = colInfo.results.map((c) => c.name);
+    if (validCols.length === 0) continue;
+
+    const validColSet = new Set(validCols);
+    restoredTables.push(tbl);
+
+    for (const item of rawRows) {
+      if (!item || typeof item !== 'object') continue;
+      const rec = item as Record<string, unknown>;
+      const cols = Object.keys(rec).filter((c) => validColSet.has(c));
+      if (cols.length === 0) continue;
+
+      const placeholders = cols.map(() => '?').join(', ');
+      const colSql = cols.map((c) => `"${c}"`).join(', ');
+      const values = cols.map((c) => {
+        const v = rec[c];
+        if (v === undefined) return null;
+        if (v !== null && typeof v === 'object') return JSON.stringify(v);
+        return v;
+      });
+
+      if (tbl === 'connected_apps') {
+        const updateCols = cols.filter((c) => c !== 'id' && c !== 'app_uid');
+        if (updateCols.length > 0) {
+          const updateSet = updateCols.map((c) => `"${c}" = excluded."${c}"`).join(', ');
+          await d1
+            .prepare(
+              `INSERT INTO "connected_apps" (${colSql}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updateSet}`
+            )
+            .bind(...values)
+            .run();
+        } else {
+          await d1
+            .prepare(`INSERT OR IGNORE INTO "connected_apps" (${colSql}) VALUES (${placeholders})`)
+            .bind(...values)
+            .run();
+        }
+      } else {
+        await d1
+          .prepare(`INSERT OR REPLACE INTO "${tbl}" (${colSql}) VALUES (${placeholders})`)
+          .bind(...values)
+          .run();
+      }
+      restoredRows += 1;
+    }
+  }
+
+  return { restoredTables, restoredRows };
+}
 
 const ALLOWED_FILE_MIMES = new Set([
   'image/png',
@@ -208,9 +426,13 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
       });
     }
 
+    const appIdParam = ctx.url.searchParams.get('appId');
+    const scopedAppId = appIdParam && appIdParam !== 'all' && Number.isFinite(Number(appIdParam)) ? Number(appIdParam) : null;
+
     const backupRows = await ctx.db
       .select({
         id: backups.id,
+        appId: backups.appId,
         filename: backups.filename,
         type: backups.type,
         status: backups.status,
@@ -222,6 +444,7 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
         createdAt: backups.createdAt,
       })
       .from(backups)
+      .where(scopedAppId ? eq(backups.appId, scopedAppId) : undefined)
       .orderBy(desc(backups.createdAt))
       .limit(30);
 
@@ -244,6 +467,9 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
       const clone = { ...r };
       if ('two_factor_secret' in clone) clone.two_factor_secret = '[REDACTED]';
       if ('password_hash' in clone) clone.password_hash = '[REDACTED]';
+      if ('key_hash' in clone) clone.key_hash = '[REDACTED]';
+      if ('signing_secret' in clone) clone.signing_secret = '[REDACTED]';
+      if ('webhook_secret' in clone) clone.webhook_secret = '[REDACTED]';
       if ('content_base64' in clone) clone.content_base64 = '[BINARY_OMITTED]';
       return clone;
     });
@@ -270,56 +496,13 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
     const permFail = await requirePermission(ctx, 'database.inspect');
     if (permFail) return permFail;
 
-    const tablesToExport = [
-      'roles',
-      'users',
-      'content_items',
-      'categories',
-      'notifications',
-      'transactions',
-      'ad_configs',
-      'support_tickets',
-      'system_settings',
-      'feature_flags',
-      'app_releases',
-      'audit_logs',
-    ];
+    const body = await readJsonBody<{ appId?: number | null; type?: string }>(ctx.request);
+    const appId =
+      body.appId !== undefined && body.appId !== null && Number.isFinite(Number(body.appId)) && Number(body.appId) > 0
+        ? Math.floor(Number(body.appId))
+        : null;
 
-    const snapshotData: Record<string, unknown[]> = {};
-    let totalRows = 0;
-
-    for (const tbl of tablesToExport) {
-      const r = await ctx.env.DB.prepare(`SELECT * FROM "${tbl}"`).all<Record<string, unknown>>();
-      const sanitized = r.results.map((row) => {
-        if (tbl === 'users') {
-          return { ...row, two_factor_secret: null, password_hash: null };
-        }
-        return row;
-      });
-      snapshotData[tbl] = sanitized;
-      totalRows += sanitized.length;
-    }
-
-    const jsonString = JSON.stringify(snapshotData);
-    const checksumSha256 = await computeSha256(jsonString);
-    const sizeBytes = new TextEncoder().encode(jsonString).byteLength;
-    const filename = `aegis-d1-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-
-    const created = await ctx.db
-      .insert(backups)
-      .values({
-        filename,
-        type: 'manual',
-        status: 'verified',
-        sizeBytes,
-        checksumSha256,
-        tablesIncluded: tablesToExport,
-        rowCount: totalRows,
-        snapshotData,
-        verifiedAt: new Date(),
-        createdBy: ctx.adminUser!.id,
-      })
-      .returning();
+    const backup = await createFullBackupSnapshot(ctx.db, ctx.env.DB, ctx.adminUser!.id, 'manual', appId);
 
     await writeAuditLog(ctx.db, {
       actorId: ctx.adminUser!.id,
@@ -327,24 +510,13 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
       action: 'database.backup_created',
       module: 'database',
       targetType: 'backup',
-      targetId: created[0].id,
-      details: { filename, rowCount: totalRows, sizeBytes, checksumSha256 },
+      targetId: backup.id,
+      details: { ...backup, appId },
       ipAddress: ctx.clientIp,
       userAgent: ctx.userAgent,
     });
 
-    return jsonResponse(
-      {
-        backup: {
-          id: created[0].id,
-          filename,
-          sizeBytes,
-          checksumSha256,
-          rowCount: totalRows,
-        },
-      },
-      201
-    );
+    return jsonResponse({ backup }, 201);
   });
 
   router.post('/api/database/backups/:id/verify', async (ctx: WorkerContext) => {
@@ -368,6 +540,82 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
       .where(eq(backups.id, id));
 
     return jsonResponse({ id, valid, checksumSha256: recomputed });
+  });
+
+  router.post('/api/database/backups/:id/restore', async (ctx: WorkerContext) => {
+    const permFail = await requirePermission(ctx, 'database.restore');
+    if (permFail) return permFail;
+
+    const id = Number(ctx.params.id);
+    const rows = await ctx.db.select().from(backups).where(eq(backups.id, id)).limit(1);
+    const backup = rows[0];
+    if (!backup) return errorResponse(404, 'Backup record not found.');
+
+    const recomputed = await computeSha256(JSON.stringify(backup.snapshotData));
+    if (recomputed !== backup.checksumSha256) {
+      return errorResponse(400, 'Backup integrity checksum verification failed; restore aborted.');
+    }
+
+    const body = await readJsonBody<{ mode?: string }>(ctx.request);
+    const mode = body.mode === 'merge' ? 'merge' : 'replace';
+
+    const result = await restoreSnapshotDataToD1(
+      ctx.env.DB,
+      (backup.snapshotData ?? {}) as Record<string, unknown>,
+      mode,
+      backup.appId ?? null
+    );
+
+    await writeAuditLog(ctx.db, {
+      actorId: ctx.adminUser!.id,
+      actorEmail: ctx.adminUser!.email,
+      action: 'database.backup_restored',
+      module: 'database',
+      targetType: 'backup',
+      targetId: id,
+      details: { mode, appId: backup.appId, ...result },
+      ipAddress: ctx.clientIp,
+      userAgent: ctx.userAgent,
+    });
+
+    return jsonResponse({ restored: true, backupId: id, mode, ...result });
+  });
+
+  router.post('/api/database/restore', async (ctx: WorkerContext) => {
+    const permFail = await requirePermission(ctx, 'database.restore');
+    if (permFail) return permFail;
+
+    const body = await readJsonBody<{
+      mode?: string;
+      snapshotData?: Record<string, unknown>;
+      appId?: number | null;
+    }>(ctx.request);
+
+    if (!body.snapshotData || typeof body.snapshotData !== 'object' || Array.isArray(body.snapshotData)) {
+      return errorResponse(400, 'Valid snapshotData JSON object is required.');
+    }
+
+    const mode = body.mode === 'replace' ? 'replace' : 'merge';
+    const appId =
+      body.appId !== undefined && body.appId !== null && Number.isFinite(Number(body.appId)) && Number(body.appId) > 0
+        ? Math.floor(Number(body.appId))
+        : null;
+
+    const result = await restoreSnapshotDataToD1(ctx.env.DB, body.snapshotData, mode, appId);
+
+    await writeAuditLog(ctx.db, {
+      actorId: ctx.adminUser!.id,
+      actorEmail: ctx.adminUser!.email,
+      action: 'database.snapshot_imported',
+      module: 'database',
+      targetType: 'database',
+      targetId: appId ? `app-${appId}` : 'full',
+      details: { mode, ...result },
+      ipAddress: ctx.clientIp,
+      userAgent: ctx.userAgent,
+    });
+
+    return jsonResponse({ restored: true, mode, ...result });
   });
 
   router.get('/api/database/backups/:id/download', async (ctx: WorkerContext) => {

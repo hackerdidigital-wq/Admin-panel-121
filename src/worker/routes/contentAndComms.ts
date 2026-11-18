@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import {
   categories,
+  connectedApps,
   contentItems,
   contentVersions,
   notificationTemplates,
@@ -22,6 +23,13 @@ import { requireAuth, requirePermission } from '../auth.ts';
 import { errorResponse, jsonResponse, queryRecord, readJsonBody } from '../http.ts';
 import type { WorkerRouter } from '../router.ts';
 import type { WorkerContext } from '../types.ts';
+import { dispatchWebhooksForEvent } from './multiAppAndSdk.ts';
+
+function parseOptionalAppId(raw: unknown): number | null {
+  if (raw === undefined || raw === null || raw === '' || raw === 'all') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
 
 export function registerContentAndCommsRoutes(router: WorkerRouter): void {
   // ---- MODULE D: CONTENT MANAGEMENT ----
@@ -32,8 +40,10 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
     const q = queryRecord(ctx);
     const params = parsePaginationQuery(q, ['createdAt', 'updatedAt', 'title', 'status'], 'updatedAt');
     const statusFilter = sanitizeText(q.status || 'all', 30);
+    const appIdFilter = parseOptionalAppId(q.appId);
 
     const conditions: SQL[] = [];
+    if (appIdFilter) conditions.push(eq(contentItems.appId, appIdFilter));
     if (statusFilter !== 'all') {
       conditions.push(eq(contentItems.status, statusFilter));
     } else {
@@ -47,7 +57,7 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
     }
 
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
-    const [totalRows, rows, catRows] = await Promise.all([
+    const [totalRows, rows, catRows, appRows] = await Promise.all([
       ctx.db
         .select({ total: sql<number>`cast(count(*) as integer)` })
         .from(contentItems)
@@ -60,14 +70,17 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
         .limit(params.pageSize)
         .offset((params.page - 1) * params.pageSize),
       ctx.db.select().from(categories).orderBy(categories.name),
+      ctx.db.select({ id: connectedApps.id, name: connectedApps.name }).from(connectedApps),
     ]);
 
     const categoryNameById = new Map(catRows.map((c) => [c.id, c.name]));
+    const appNameById = new Map(appRows.map((a) => [a.id, a.name]));
 
     return jsonResponse({
       data: rows.map((r) => ({
         ...r,
         categoryName: r.categoryId ? (categoryNameById.get(r.categoryId) ?? null) : null,
+        appName: r.appId ? (appNameById.get(r.appId) ?? null) : null,
       })),
       categories: catRows,
       total: Number(totalRows[0]?.total ?? 0),
@@ -81,6 +94,7 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
     if (permFail) return permFail;
 
     const body = await readJsonBody<{
+      appId?: number | null;
       title?: string;
       slug?: string;
       excerpt?: string;
@@ -108,6 +122,7 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
     const created = await ctx.db
       .insert(contentItems)
       .values({
+        appId: parseOptionalAppId(body.appId),
         title,
         slug: finalSlug,
         excerpt: sanitizeText(body.excerpt, 400),
@@ -297,12 +312,16 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
     const q = queryRecord(ctx);
     const channel = sanitizeText(q.channel || 'all', 20);
     const status = sanitizeText(q.status || 'all', 20);
+    const appIdFilter = parseOptionalAppId(q.appId);
 
     const conditions: SQL[] = [];
     if (channel !== 'all') conditions.push(eq(notifications.channel, channel));
     if (status !== 'all') conditions.push(eq(notifications.status, status));
+    if (appIdFilter) {
+      conditions.push(sql`(${notifications.appId} = ${appIdFilter} OR ${notifications.targetType} = 'all_apps')`);
+    }
 
-    const [rows, tplRows] = await Promise.all([
+    const [rows, tplRows, appRows] = await Promise.all([
       ctx.db
         .select()
         .from(notifications)
@@ -310,10 +329,16 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
         .orderBy(desc(notifications.createdAt))
         .limit(100),
       ctx.db.select().from(notificationTemplates).orderBy(notificationTemplates.name),
+      ctx.db.select({ id: connectedApps.id, name: connectedApps.name }).from(connectedApps),
     ]);
 
+    const appNameById = new Map(appRows.map((a) => [a.id, a.name]));
+
     return jsonResponse({
-      data: rows,
+      data: rows.map((r) => ({
+        ...r,
+        appName: r.appId ? (appNameById.get(r.appId) ?? null) : null,
+      })),
       templates: tplRows,
       providers: {
         in_app: { configured: true, provider: 'cloudflare-d1-sqlite' },
@@ -328,6 +353,7 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
     if (permFail) return permFail;
 
     const body = await readJsonBody<{
+      appId?: number | null;
       title?: string;
       message?: string;
       channel?: string;
@@ -336,10 +362,15 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
       scheduledFor?: string;
     }>(ctx.request);
 
+    const appId = parseOptionalAppId(body.appId);
     const title = sanitizeText(body.title, 160);
     const message = sanitizeText(body.message, 2000);
     const channel = ['in_app', 'email', 'push'].includes(body.channel || '') ? body.channel! : 'in_app';
-    const targetType = ['all', 'role', 'user'].includes(body.targetType || '') ? body.targetType! : 'all';
+    const targetType = ['all', 'all_apps', 'app', 'role', 'user'].includes(body.targetType || '')
+      ? body.targetType!
+      : appId
+        ? 'app'
+        : 'all';
 
     if (!title || !message) {
       return errorResponse(400, 'Notification title and message are required.');
@@ -347,7 +378,7 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
 
     const isScheduled = Boolean(body.scheduledFor);
     let deliveryStatus = 'delivered';
-    let providerStatus = 'in_app_persisted';
+    let providerStatus = targetType === 'all_apps' ? 'multi_app_broadcast_persisted' : 'in_app_persisted';
 
     if (isScheduled) {
       deliveryStatus = 'scheduled';
@@ -363,6 +394,7 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
     const created = await ctx.db
       .insert(notifications)
       .values({
+        appId: targetType === 'all_apps' ? null : appId,
         title,
         message,
         channel,
@@ -383,11 +415,20 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
       module: 'notifications',
       targetType: 'notification',
       targetId: created[0].id,
-      details: { channel, deliveryStatus, providerStatus },
+      details: { channel, targetType, appId, deliveryStatus, providerStatus },
       status: deliveryStatus === 'failed' ? 'failure' : 'success',
       ipAddress: ctx.clientIp,
       userAgent: ctx.userAgent,
     });
+
+    if (deliveryStatus === 'delivered' && (targetType === 'app' || targetType === 'all_apps')) {
+      await dispatchWebhooksForEvent(
+        ctx,
+        targetType === 'all_apps' ? null : appId,
+        'notification.dispatched',
+        { id: created[0].id, title, message, channel, targetType }
+      );
+    }
 
     return jsonResponse({ notification: created[0] }, 201);
   });
@@ -429,6 +470,14 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
     return jsonResponse({ template: created[0] }, 201);
   });
 
+  router.delete('/api/notifications/templates/:id', async (ctx: WorkerContext) => {
+    const permFail = await requirePermission(ctx, 'notifications.send');
+    if (permFail) return permFail;
+    const id = Number(ctx.params.id);
+    await ctx.db.delete(notificationTemplates).where(eq(notificationTemplates.id, id));
+    return jsonResponse({ deleted: true });
+  });
+
   // ---- MODULE I: SUPPORT & COMMUNICATION ----
   router.get('/api/support/tickets', async (ctx: WorkerContext) => {
     const permFail = await requirePermission(ctx, 'support.read');
@@ -437,8 +486,10 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
     const q = queryRecord(ctx);
     const params = parsePaginationQuery(q, ['createdAt', 'updatedAt', 'priority', 'status'], 'updatedAt');
     const statusFilter = sanitizeText(q.status || 'all', 20);
+    const appIdFilter = parseOptionalAppId(q.appId);
 
     const conditions: SQL[] = [];
+    if (appIdFilter) conditions.push(eq(supportTickets.appId, appIdFilter));
     if (statusFilter !== 'all' && isValidTicketStatus(statusFilter)) {
       conditions.push(eq(supportTickets.status, statusFilter));
     }
@@ -454,6 +505,8 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
       ctx.db
         .select({
           id: supportTickets.id,
+          appId: supportTickets.appId,
+          appName: connectedApps.name,
           ticketNumber: supportTickets.ticketNumber,
           userId: supportTickets.userId,
           userEmail: users.email,
@@ -469,6 +522,7 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
         })
         .from(supportTickets)
         .leftJoin(users, eq(supportTickets.userId, users.id))
+        .leftJoin(connectedApps, eq(supportTickets.appId, connectedApps.id))
         .where(whereClause)
         .orderBy(desc(supportTickets.updatedAt))
         .limit(params.pageSize)
@@ -484,6 +538,7 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
     if (permFail) return permFail;
 
     const body = await readJsonBody<{
+      appId?: number | null;
       subject?: string;
       description?: string;
       category?: string;
@@ -503,6 +558,7 @@ export function registerContentAndCommsRoutes(router: WorkerRouter): void {
     const created = await ctx.db
       .insert(supportTickets)
       .values({
+        appId: parseOptionalAppId(body.appId),
         ticketNumber,
         userId: body.userId ? Number(body.userId) : ctx.adminUser!.id,
         category: sanitizeText(body.category || 'general', 60),

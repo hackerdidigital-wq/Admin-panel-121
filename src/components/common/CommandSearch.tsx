@@ -21,6 +21,7 @@ interface CommandSearchProps {
 
 const FILTER_TYPES = [
   { id: 'all', label: 'All' },
+  { id: 'apps', label: 'Apps' },
   { id: 'users', label: 'Users' },
   { id: 'content', label: 'Content' },
   { id: 'transactions', label: 'Transactions' },

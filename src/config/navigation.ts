@@ -4,6 +4,7 @@ import {
   AppWindow,
   BarChart3,
   Bell,
+  Boxes,
   Database,
   FileText,
   FolderOpen,
@@ -47,6 +48,22 @@ export const SIDEBAR_MODULES: SidebarModule[] = [
       { id: 'analytics-overview', label: 'Analytics', permission: 'analytics.read' },
       { id: 'analytics-reports', label: 'Reports', permission: 'analytics.read' },
       { id: 'overview-activity', label: 'Activity Overview', permission: 'dashboard.read' },
+    ],
+  },
+  {
+    id: 'apps',
+    code: 'M0',
+    label: 'Multi-App Center',
+    icon: Boxes,
+    permission: 'apps.read',
+    submenus: [
+      { id: 'apps-directory', label: 'Connected Apps', permission: 'apps.read' },
+      { id: 'apps-connect', label: 'Connect App & SDK', permission: 'apps.manage' },
+      { id: 'apps-users', label: 'App End-Users', permission: 'apps.read' },
+      { id: 'apps-api-keys', label: 'API Keys & Scopes', permission: 'apps.keys' },
+      { id: 'apps-webhooks', label: 'Webhooks', permission: 'webhooks.manage' },
+      { id: 'apps-health', label: 'Health & Error Monitor', permission: 'apps.read' },
+      { id: 'apps-permissions', label: 'App Team Permissions', permission: 'roles.manage' },
     ],
   },
   {
@@ -301,6 +318,7 @@ export function resolveBreadcrumb(viewId: string): { moduleLabel: string; pageLa
 
 export const MODULE_ICON_BY_KEY: Record<string, LucideIcon> = {
   overview: LayoutDashboard,
+  apps: Boxes,
   users: Users,
   roles: KeyRound,
   content: FileText,

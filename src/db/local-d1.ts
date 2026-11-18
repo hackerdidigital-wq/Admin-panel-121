@@ -98,10 +98,51 @@ export function createLocalD1Database(
   rawDb.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
 
   if (!options.skipMigrations) {
-    const migrationPath = path.resolve(process.cwd(), 'migrations', '0001_init.sql');
-    if (fs.existsSync(migrationPath)) {
-      const migrationSql = fs.readFileSync(migrationPath, 'utf8');
-      rawDb.exec(migrationSql);
+    const migrationsDir = path.resolve(process.cwd(), 'migrations');
+    if (fs.existsSync(migrationsDir)) {
+      const migrationFiles = fs
+        .readdirSync(migrationsDir)
+        .filter((f) => f.endsWith('.sql'))
+        .sort();
+
+      const versionRow = rawDb.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined;
+      let currentVersion = Number(versionRow?.user_version ?? 0);
+
+      // Detect pre-existing databases migrated before user_version tracking
+      if (currentVersion === 0) {
+        const existingTables = new Set(
+          (
+            rawDb
+              .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+              .all() as Array<{ name: string }>
+          ).map((r) => r.name)
+        );
+        if (existingTables.has('users') && existingTables.has('connected_apps')) {
+          const adCols = new Set(
+            (rawDb.prepare('PRAGMA table_info(ad_configs)').all() as Array<{ name: string }>).map(
+              (c) => c.name
+            )
+          );
+          const apiCols = new Set(
+            (rawDb.prepare('PRAGMA table_info(api_logs)').all() as Array<{ name: string }>).map(
+              (c) => c.name
+            )
+          );
+          if (adCols.has('app_id') && adCols.has('ecpm_cents') && apiCols.has('app_id')) {
+            currentVersion = migrationFiles.length;
+            rawDb.exec(`PRAGMA user_version = ${currentVersion};`);
+          }
+        }
+      }
+
+      for (let i = 0; i < migrationFiles.length; i++) {
+        const targetVersion = i + 1;
+        if (currentVersion >= targetVersion) continue;
+        const migrationSql = fs.readFileSync(path.join(migrationsDir, migrationFiles[i]), 'utf8');
+        rawDb.exec(migrationSql);
+        rawDb.exec(`PRAGMA user_version = ${targetVersion};`);
+        currentVersion = targetVersion;
+      }
     }
   }
 

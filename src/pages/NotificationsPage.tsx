@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Send } from 'lucide-react';
+import { Plus, Send, Trash2 } from 'lucide-react';
 import { apiRequest } from '../lib/api';
 import { DataTable, type TableColumn } from '../components/common/DataTable';
 import { useToast } from '../components/common/Toast';
+import { useAppScope } from '../contexts/AppScopeContext';
 import { useAuth } from '../contexts/AuthContext';
 
 interface NotifRow {
   id: number;
+  appId: number | null;
   title: string;
   message: string;
   channel: string;
@@ -29,6 +31,7 @@ interface TemplateRow {
 export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) => {
   const { hasPerm } = useAuth();
   const { pushToast } = useToast();
+  const { selectedAppId, selectedApp } = useAppScope();
   const [rows, setRows] = useState<NotifRow[]>([]);
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [providers, setProviders] = useState<{
@@ -42,8 +45,14 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
   const [title, setTitle] = useState('');
   const [message, setMessage] = useState('');
   const [channel, setChannel] = useState('in_app');
-  const [targetType, setTargetType] = useState('all');
+  const [targetType, setTargetType] = useState('all_apps');
+  const [scheduledFor, setScheduledFor] = useState('');
   const [sending, setSending] = useState(false);
+
+  // Template creator
+  const [tplName, setTplName] = useState('');
+  const [tplSubject, setTplSubject] = useState('');
+  const [tplBody, setTplBody] = useState('');
 
   const loadNotifications = useCallback(async () => {
     setLoading(true);
@@ -54,6 +63,7 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
       if (subview === 'notifications-push') qs.set('channel', 'push');
       if (subview === 'notifications-scheduled') qs.set('status', 'scheduled');
       if (subview === 'notifications-failed') qs.set('status', 'failed');
+      if (selectedAppId !== 'all') qs.set('appId', String(selectedAppId));
 
       const res = await apiRequest<{
         data: NotifRow[];
@@ -72,7 +82,7 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
     } finally {
       setLoading(false);
     }
-  }, [subview, pushToast]);
+  }, [subview, selectedAppId, pushToast]);
 
   useEffect(() => {
     void loadNotifications();
@@ -84,7 +94,14 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
     try {
       const res = await apiRequest<{ notification: NotifRow }>('/notifications', {
         method: 'POST',
-        body: JSON.stringify({ title, message, channel, targetType }),
+        body: JSON.stringify({
+          title,
+          message,
+          channel,
+          targetType,
+          appId: targetType === 'app' && selectedAppId !== 'all' ? selectedAppId : selectedAppId !== 'all' ? selectedAppId : null,
+          scheduledFor: scheduledFor || undefined,
+        }),
       });
       if (res.notification.status === 'failed') {
         pushToast({
@@ -92,11 +109,14 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
           title: 'External provider not configured',
           description: `Recorded as failed (${res.notification.deliveryProviderStatus}). Only In-App delivery is natively active without SMTP/FCM keys.`,
         });
+      } else if (res.notification.status === 'scheduled') {
+        pushToast({ type: 'info', title: 'Notification scheduled' });
       } else {
-        pushToast({ type: 'success', title: 'Notification delivered via In-App D1 persistence' });
+        pushToast({ type: 'success', title: 'Notification delivered & logged to D1' });
       }
       setTitle('');
       setMessage('');
+      setScheduledFor('');
       await loadNotifications();
     } catch (err) {
       pushToast({
@@ -110,18 +130,92 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
   };
 
   if (subview === 'notifications-templates') {
+    const createTemplate = async (e: React.FormEvent) => {
+      e.preventDefault();
+      try {
+        await apiRequest('/notifications/templates', {
+          method: 'POST',
+          body: JSON.stringify({ name: tplName, subject: tplSubject, body: tplBody, channel: 'in_app' }),
+        });
+        setTplName('');
+        setTplSubject('');
+        setTplBody('');
+        pushToast({ type: 'success', title: 'Notification template saved' });
+        await loadNotifications();
+      } catch (err) {
+        pushToast({
+          type: 'error',
+          title: 'Could not save template',
+          description: err instanceof Error ? err.message : undefined,
+        });
+      }
+    };
+
     return (
       <div className="space-y-5">
         <h1 className="font-display text-xl font-semibold">Notification Templates</h1>
-        <div className="divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
-          {templates.map((t) => (
-            <div key={t.id} className="p-4 text-xs">
-              <p className="font-semibold text-slate-900 dark:text-slate-100">
-                {t.name} · <span className="font-mono">{t.key}</span>
-              </p>
-              <p className="mt-1 text-slate-600 dark:text-slate-400">{t.subject}: {t.body}</p>
+        {hasPerm('notifications.send') && (
+          <form onSubmit={createTemplate} className="grid gap-3 rounded-xl border border-slate-200 bg-white p-5 text-xs sm:grid-cols-3 dark:border-slate-800 dark:bg-slate-900">
+            <input
+              required
+              value={tplName}
+              onChange={(e) => setTplName(e.target.value)}
+              placeholder="Template name"
+              className="h-9 rounded-lg border border-slate-200 px-3 dark:border-slate-700 dark:bg-slate-950"
+            />
+            <input
+              required
+              value={tplSubject}
+              onChange={(e) => setTplSubject(e.target.value)}
+              placeholder="Subject"
+              className="h-9 rounded-lg border border-slate-200 px-3 dark:border-slate-700 dark:bg-slate-950"
+            />
+            <div className="flex gap-2">
+              <input
+                required
+                value={tplBody}
+                onChange={(e) => setTplBody(e.target.value)}
+                placeholder="Body text..."
+                className="h-9 flex-1 rounded-lg border border-slate-200 px-3 dark:border-slate-700 dark:bg-slate-950"
+              />
+              <button type="submit" className="inline-flex h-9 items-center gap-1 rounded-lg bg-blue-600 px-3 font-medium text-white">
+                <Plus className="h-3.5 w-3.5" />
+                Save
+              </button>
             </div>
-          ))}
+          </form>
+        )}
+        <div className="divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
+          {templates.length === 0 ? (
+            <p className="p-8 text-center text-xs text-slate-500">No templates saved yet.</p>
+          ) : (
+            templates.map((t) => (
+              <div key={t.id} className="flex items-center justify-between gap-3 p-4 text-xs">
+                <div>
+                  <p className="font-semibold text-slate-900 dark:text-slate-100">
+                    {t.name} · <span className="font-mono">{t.key}</span>
+                  </p>
+                  <p className="mt-1 text-slate-600 dark:text-slate-400">
+                    {t.subject}: {t.body}
+                  </p>
+                </div>
+                {hasPerm('notifications.send') && (
+                  <button
+                    type="button"
+                    aria-label={`Delete template ${t.name}`}
+                    onClick={async () => {
+                      await apiRequest(`/notifications/templates/${t.id}`, { method: 'DELETE' });
+                      pushToast({ type: 'success', title: 'Template deleted' });
+                      await loadNotifications();
+                    }}
+                    className="rounded border border-red-200 p-1.5 text-red-600 dark:border-red-900"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            ))
+          )}
         </div>
       </div>
     );
@@ -138,7 +232,15 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
         </div>
       ),
     },
-    { key: 'channel', label: 'Channel' },
+    {
+      key: 'targetType',
+      label: 'Target & Channel',
+      render: (r) => (
+        <span className="text-xs">
+          {r.channel} · {r.targetType} {r.appId ? `(App #${r.appId})` : ''}
+        </span>
+      ),
+    },
     {
       key: 'status',
       label: 'Delivery Status',
@@ -164,15 +266,15 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
     <div className="space-y-6">
       <div>
         <h1 className="font-display text-xl font-semibold text-slate-900 dark:text-slate-100">
-          Notifications Center
+          Notifications Center {selectedApp ? `· ${selectedApp.name}` : ''}
         </h1>
         <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-          In-app notifications are persisted in Cloudflare D1 SQLite. Email/Push channels report actual provider status rather than simulated delivery.
+          Broadcast in-app notices across all connected apps or target a single app scope. Email/Push channels report actual provider status.
         </p>
       </div>
 
       {providers && (
-        <div className="grid gap-3 sm:grid-cols-3 text-xs">
+        <div className="grid gap-3 text-xs sm:grid-cols-3">
           <div className="rounded-xl border border-slate-200 bg-white p-3.5 dark:border-slate-800 dark:bg-slate-900">
             <p className="text-slate-500">In-App Delivery</p>
             <p className="mt-1 font-medium text-emerald-700 dark:text-emerald-400">
@@ -194,13 +296,13 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
         </div>
       )}
 
-      {hasPerm('notifications.send') && (
+      {hasPerm('notifications.send') && subview !== 'notifications-settings' && (
         <form
           onSubmit={sendNotification}
-          className="rounded-xl border border-slate-200 bg-white p-5 space-y-3 dark:border-slate-800 dark:bg-slate-900"
+          className="space-y-3 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"
         >
-          <h2 className="font-display text-sm font-semibold">Dispatch Notification</h2>
-          <div className="grid gap-3 sm:grid-cols-3">
+          <h2 className="font-display text-sm font-semibold">Dispatch Multi-App or Admin Notification</h2>
+          <div className="grid gap-3 sm:grid-cols-4">
             <input
               required
               value={title}
@@ -211,6 +313,7 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
             <select
               value={channel}
               onChange={(e) => setChannel(e.target.value)}
+              aria-label="Notification channel"
               className="h-9 rounded-lg border border-slate-200 px-3 text-xs dark:border-slate-700 dark:bg-slate-950"
             >
               <option value="in_app">In-App (Cloudflare D1 SQLite)</option>
@@ -220,11 +323,21 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
             <select
               value={targetType}
               onChange={(e) => setTargetType(e.target.value)}
+              aria-label="Notification target audience"
               className="h-9 rounded-lg border border-slate-200 px-3 text-xs dark:border-slate-700 dark:bg-slate-950"
             >
+              <option value="all_apps">Broadcast to All Connected Apps</option>
+              {selectedApp && <option value="app">Selected App Only ({selectedApp.name})</option>}
               <option value="all">Broadcast to All Admins</option>
               <option value="user">Current Admin Session</option>
             </select>
+            <input
+              type="datetime-local"
+              value={scheduledFor}
+              onChange={(e) => setScheduledFor(e.target.value)}
+              aria-label="Optional scheduled delivery time"
+              className="h-9 rounded-lg border border-slate-200 px-2 text-xs dark:border-slate-700 dark:bg-slate-950"
+            />
           </div>
           <div className="flex gap-2">
             <input
@@ -240,18 +353,20 @@ export const NotificationsPage: React.FC<{ subview: string }> = ({ subview }) =>
               className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-4 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
             >
               <Send className="h-3.5 w-3.5" />
-              {sending ? 'Sending...' : 'Send'}
+              {sending ? 'Sending...' : scheduledFor ? 'Schedule' : 'Send'}
             </button>
           </div>
         </form>
       )}
 
-      <DataTable<NotifRow>
-        tableId="notifications-log"
-        columns={columns}
-        rows={rows}
-        loading={loading}
-      />
+      {subview !== 'notifications-compose' && (
+        <DataTable<NotifRow>
+          tableId="notifications-log"
+          columns={columns}
+          rows={rows}
+          loading={loading}
+        />
+      )}
     </div>
   );
 };

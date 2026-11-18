@@ -51,7 +51,7 @@ async function apiCall(
   return handleApiRequest(req, env);
 }
 
-test('D1 SQLite migration initializes all 26 relational tables, foreign keys, and indexes', async () => {
+test('D1 SQLite migrations initialize all 33 relational tables, foreign keys, and indexes', async () => {
   const { d1, raw } = createLocalD1Database(':memory:');
   try {
     const tables = await d1
@@ -59,14 +59,14 @@ test('D1 SQLite migration initializes all 26 relational tables, foreign keys, an
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
       )
       .all<{ name: string }>();
-    assert.equal(tables.results.length, 26);
+    assert.equal(tables.results.length, 33);
 
     const indexes = await d1
       .prepare(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'"
       )
       .all<{ name: string }>();
-    assert.ok(indexes.results.length >= 15);
+    assert.ok(indexes.results.length >= 20);
 
     const fkCheck = raw.prepare('PRAGMA foreign_key_check').all();
     assert.equal(fkCheck.length, 0);
@@ -531,4 +531,267 @@ test('Missing D1 binding returns clean 503 JSON, ExecutionContext.waitUntil reco
   }
 });
 
+test('Multi-App CRUD, Strict App Isolation, SDK Key Rotation/Revocation, User Banning, AdMob, & Exports', async () => {
+  const { env, close } = createTestEnv();
+  try {
+    const setupRes = await apiCall(env, 'POST', '/api/auth/setup', {
+      body: { password: 'SuperPassword#2026' },
+    });
+    assert.equal(setupRes.status, 201);
+    const cookie = extractCookieValue(setupRes);
 
+    // 1. Connect Android App A & Website App B
+    const appARes = await apiCall(env, 'POST', '/api/apps', {
+      cookie,
+      body: {
+        name: 'Atlas Runner Android',
+        platform: 'android',
+        packageOrDomain: 'com.aegis.atlasrunner',
+        currentVersion: '2.1.0',
+        minSupportedVersion: '2.0.0',
+        admobAppId: 'ca-app-pub-3940256099942544~3347511713',
+      },
+    });
+    assert.equal(appARes.status, 201);
+    const appABody = (await appARes.json()) as {
+      app: { id: number; appUid: string; name: string };
+      initialApiKey: string;
+      initialKeyRecord: { id: number };
+    };
+    assert.ok(appABody.initialApiKey.startsWith('aegis_live_'));
+
+    const appBRes = await apiCall(env, 'POST', '/api/apps', {
+      cookie,
+      body: {
+        name: 'Nova Portal Web',
+        platform: 'website',
+        packageOrDomain: 'https://nova.example.com',
+      },
+    });
+    assert.equal(appBRes.status, 201);
+    const appBBody = (await appBRes.json()) as {
+      app: { id: number; appUid: string };
+      initialApiKey: string;
+    };
+
+    // 2. Cross-app isolation: App A key MUST work for App A and MUST FAIL (401) for App B
+    const sdkValidA = await apiCall(env, 'GET', '/api/v1/sdk/config', {
+      headers: {
+        'x-app-id': appABody.app.appUid,
+        'x-api-key': appABody.initialApiKey,
+      },
+    });
+    assert.equal(sdkValidA.status, 200);
+    const cfgA = (await sdkValidA.json()) as { app: { name: string; currentVersion: string } };
+    assert.equal(cfgA.app.name, 'Atlas Runner Android');
+    assert.equal(cfgA.app.currentVersion, '2.1.0');
+
+    const sdkCrossAppFail = await apiCall(env, 'GET', '/api/v1/sdk/config', {
+      headers: {
+        'x-app-id': appBBody.app.appUid,
+        'x-api-key': appABody.initialApiKey,
+      },
+    });
+    assert.equal(sdkCrossAppFail.status, 401);
+
+    // 3. Key rotation invalidates old key & activates new key; revocation blocks it
+    const rotateRes = await apiCall(
+      env,
+      'POST',
+      `/api/apps/${appABody.app.id}/keys/${appABody.initialKeyRecord.id}/rotate`,
+      { cookie, body: {} }
+    );
+    assert.equal(rotateRes.status, 200);
+    const rotateBody = (await rotateRes.json()) as { apiKey: string; key: { id: number } };
+    assert.notEqual(rotateBody.apiKey, appABody.initialApiKey);
+
+    const oldKeyRes = await apiCall(env, 'GET', '/api/v1/sdk/config', {
+      headers: { 'x-app-id': appABody.app.appUid, 'x-api-key': appABody.initialApiKey },
+    });
+    assert.equal(oldKeyRes.status, 401);
+
+    const newKeyRes = await apiCall(env, 'GET', '/api/v1/sdk/config', {
+      headers: { 'x-app-id': appABody.app.appUid, authorization: `Bearer ${rotateBody.apiKey}` },
+    });
+    assert.equal(newKeyRes.status, 200);
+
+    // 4. End-user sync -> admin ban -> SDK sync blocked with 403 -> revoke key -> 401
+    const syncRes = await apiCall(env, 'POST', '/api/v1/sdk/users/sync', {
+      headers: { 'x-app-id': appABody.app.appUid, 'x-api-key': rotateBody.apiKey },
+      body: {
+        externalUserId: 'player_901',
+        email: 'player901@example.com',
+        displayName: 'Player 901',
+        appVersion: '2.1.0',
+        deviceModel: 'Pixel 8',
+      },
+    });
+    assert.equal(syncRes.status, 201);
+    const syncBody = (await syncRes.json()) as { user: { id: number; status: string } };
+    assert.equal(syncBody.user.status, 'active');
+
+    const banRes = await apiCall(env, 'PATCH', `/api/app-users/${syncBody.user.id}`, {
+      cookie,
+      body: { status: 'banned' },
+    });
+    assert.equal(banRes.status, 200);
+
+    const bannedSyncRes = await apiCall(env, 'POST', '/api/v1/sdk/users/sync', {
+      headers: { 'x-app-id': appABody.app.appUid, 'x-api-key': rotateBody.apiKey },
+      body: { externalUserId: 'player_901' },
+    });
+    assert.equal(bannedSyncRes.status, 403);
+
+    // 5. AdMob placement + atomic impression revenue + isolated SDK transaction + exports
+    const adRes = await apiCall(env, 'POST', '/api/ads', {
+      cookie,
+      body: {
+        appId: appABody.app.id,
+        name: 'Rewarded Continue',
+        network: 'Google AdMob',
+        adFormat: 'rewarded',
+        placement: 'game_over_continue',
+        admobUnitId: 'ca-app-pub-3940256099942544/5224354917',
+        ecpmCents: 2000,
+      },
+    });
+    assert.equal(adRes.status, 201);
+    const adBody = (await adRes.json()) as { adConfig: { id: number } };
+
+    const imprRes = await apiCall(env, 'POST', '/api/v1/sdk/events', {
+      headers: { 'x-app-id': appABody.app.appUid, 'x-api-key': rotateBody.apiKey },
+      body: {
+        eventType: 'ad_impression',
+        eventName: 'admob.rewarded_shown',
+        adConfigId: adBody.adConfig.id,
+      },
+    });
+    assert.equal(imprRes.status, 201);
+
+    const txSdkRes = await apiCall(env, 'POST', '/api/v1/sdk/transactions', {
+      headers: { 'x-app-id': appABody.app.appUid, 'x-api-key': rotateBody.apiKey },
+      body: { amountCents: 499, currency: 'USD', externalUserId: 'player_901' },
+    });
+    assert.equal(txSdkRes.status, 201);
+
+    // App B scoped finance list must NOT show App A's transaction
+    const financeB = await apiCall(env, 'GET', `/api/finance/transactions?appId=${appBBody.app.id}`, { cookie });
+    assert.equal(financeB.status, 200);
+    const financeBBody = (await financeB.json()) as { data: unknown[]; summary: { succeededCents: number } };
+    assert.equal(financeBBody.data.length, 0);
+    assert.equal(financeBBody.summary.succeededCents, 0);
+
+    // App A isolated exports (JSON & CSV) + finance JSON export
+    const exportAppJson = await apiCall(env, 'GET', `/api/apps/${appABody.app.id}/export?format=json`, { cookie });
+    assert.equal(exportAppJson.status, 200);
+    const exportPayload = (await exportAppJson.json()) as { endUsers: unknown[]; ads: Array<{ impressions: number; revenueCents: number }> };
+    assert.equal(exportPayload.endUsers.length, 1);
+    assert.equal(exportPayload.ads[0].impressions, 1);
+    assert.equal(exportPayload.ads[0].revenueCents, 2);
+
+    const finJson = await apiCall(env, 'GET', `/api/finance/export.json?appId=${appABody.app.id}`, { cookie });
+    assert.equal(finJson.status, 200);
+
+    // Revoke rotated key -> future SDK calls return 401
+    const revokeKeyRes = await apiCall(
+      env,
+      'DELETE',
+      `/api/apps/${appABody.app.id}/keys/${rotateBody.key.id}`,
+      { cookie }
+    );
+    assert.equal(revokeKeyRes.status, 200);
+
+    const revokedSdk = await apiCall(env, 'GET', '/api/v1/sdk/config', {
+      headers: { 'x-app-id': appABody.app.appUid, 'x-api-key': rotateBody.apiKey },
+    });
+    assert.equal(revokedSdk.status, 401);
+  } finally {
+    close();
+  }
+});
+
+test('Webhooks HMAC Setup, Scheduled Auto-Backup Job, Snapshot Restore, and App-Wise Team Permissions', async () => {
+  const { env, close } = createTestEnv();
+  try {
+    const setupRes = await apiCall(env, 'POST', '/api/auth/setup', {
+      body: { password: 'SuperPassword#2026' },
+    });
+    assert.equal(setupRes.status, 201);
+    const cookie = extractCookieValue(setupRes);
+
+    // Connect an app
+    const appRes = await apiCall(env, 'POST', '/api/apps', {
+      cookie,
+      body: { name: 'RestoreGuard App', platform: 'website', packageOrDomain: 'https://guard.example' },
+    });
+    const appBody = (await appRes.json()) as { app: { id: number } };
+
+    // Create Webhook & verify signing secret format
+    const hookRes = await apiCall(env, 'POST', '/api/webhooks', {
+      cookie,
+      body: {
+        appId: appBody.app.id,
+        name: 'Error & Ban Dispatcher',
+        targetUrl: 'https://hooks.example.com/aegis',
+        events: ['app.error', 'app_user.banned'],
+      },
+    });
+    assert.equal(hookRes.status, 201);
+    const hookBody = (await hookRes.json()) as { signingSecret: string; webhook: { id: number } };
+    assert.ok(hookBody.signingSecret.startsWith('whsec_'));
+
+    // Set a baseline setting and create an auto_backup job
+    await apiCall(env, 'PUT', '/api/settings/general.siteName', {
+      cookie,
+      body: { value: 'Baseline Console Name', category: 'general' },
+    });
+
+    const autoJobRes = await apiCall(env, 'POST', '/api/system/jobs', {
+      cookie,
+      body: { jobType: 'auto_backup' },
+    });
+    assert.equal(autoJobRes.status, 201);
+    const autoJobBody = (await autoJobRes.json()) as { job: { status: string; result: { id: number } } };
+    assert.equal(autoJobBody.job.status, 'completed');
+    const backupId = autoJobBody.job.result.id;
+    assert.ok(backupId > 0);
+
+    // Mutate the setting
+    await apiCall(env, 'PUT', '/api/settings/general.siteName', {
+      cookie,
+      body: { value: 'Temporary Mutated Name', category: 'general' },
+    });
+
+    // Restore from backup and confirm original setting returns AND admin password remains intact
+    const restoreRes = await apiCall(env, 'POST', `/api/database/backups/${backupId}/restore`, {
+      cookie,
+      body: { mode: 'replace' },
+    });
+    assert.equal(restoreRes.status, 200);
+    const restoreBody = (await restoreRes.json()) as { restored: boolean; restoredRows: number };
+    assert.equal(restoreBody.restored, true);
+    assert.ok(restoreBody.restoredRows > 0);
+
+    const settingsAfter = await apiCall(env, 'GET', '/api/settings?category=general', { cookie });
+    const settingsBody = (await settingsAfter.json()) as { settings: Array<{ key: string; value: unknown }> };
+    const siteName = settingsBody.settings.find((s) => s.key === 'general.siteName');
+    assert.equal(siteName?.value, 'Baseline Console Name');
+
+    // Login with original admin password still works after restore
+    const loginCheck = await apiCall(env, 'POST', '/api/auth/login', {
+      body: { password: 'SuperPassword#2026' },
+    });
+    assert.equal(loginCheck.status, 200);
+
+    // Assign app-wise team permission
+    const permRes = await apiCall(env, 'PUT', `/api/apps/${appBody.app.id}/permissions`, {
+      cookie,
+      body: { userId: 1, roleScope: 'owner', permissions: ['apps.read', 'apps.manage'] },
+    });
+    assert.equal(permRes.status, 200);
+    const permBody = (await permRes.json()) as { grant: { roleScope: string } };
+    assert.equal(permBody.grant.roleScope, 'owner');
+  } finally {
+    close();
+  }
+});

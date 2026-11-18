@@ -5,6 +5,7 @@
 import React, { Component, useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Lock, RefreshCw } from 'lucide-react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { AppScopeProvider } from './contexts/AppScopeContext';
 import { RealtimeProvider } from './contexts/RealtimeContext';
 import { ToastProvider } from './components/common/Toast';
 import { Sidebar } from './components/layout/Sidebar';
@@ -13,6 +14,7 @@ import { CommandSearch } from './components/common/CommandSearch';
 import { SIDEBAR_MODULES } from './config/navigation';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
+import { AppsCenterPage } from './pages/AppsCenterPage';
 import { UsersPage } from './pages/UsersPage';
 import { UserDetailPage } from './pages/UserDetailPage';
 import { RolesPage } from './pages/RolesPage';
@@ -187,6 +189,9 @@ const AdminWorkspace: React.FC = () => {
     if (activeView === 'overview-activity') {
       return <DashboardPage mode="activity" onNavigate={navigate} />;
     }
+    if (activeView.startsWith('apps-')) {
+      return <AppsCenterPage subview={activeView} onNavigate={navigate} />;
+    }
     if (activeView.startsWith('user-detail:')) {
       const userId = Number(activeView.split(':')[1]);
       return <UserDetailPage userId={userId} onBack={() => navigate('users-all')} />;
@@ -212,7 +217,7 @@ const AdminWorkspace: React.FC = () => {
       return <FinancePage subview={activeView} />;
     }
     if (activeView.startsWith('ads-')) {
-      return <AdsPage />;
+      return <AdsPage subview={activeView} />;
     }
     if (activeView.startsWith('app-')) {
       return <AppManagementPage subview={activeView} />;
@@ -284,11 +289,13 @@ const AdminWorkspace: React.FC = () => {
 export default function App() {
   return (
     <AuthProvider>
-      <RealtimeProvider>
-        <ToastProvider>
-          <AdminWorkspace />
-        </ToastProvider>
-      </RealtimeProvider>
+      <AppScopeProvider>
+        <RealtimeProvider>
+          <ToastProvider>
+            <AdminWorkspace />
+          </ToastProvider>
+        </RealtimeProvider>
+      </AppScopeProvider>
     </AuthProvider>
   );
 }

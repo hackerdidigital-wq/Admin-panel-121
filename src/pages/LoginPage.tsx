@@ -362,8 +362,8 @@ export const LoginPage: React.FC = () => {
                     <span>Cloudflare D1 &amp; Hash-Chained Audit</span>
                   </div>
                   <p className="mt-1.5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                    26 relational SQLite tables with SHA-256 hash-chained audit logs and verifiable
-                    logical backups.
+                    33 relational SQLite tables with Multi-App isolation, SHA-256 hash-chained audit
+                    logs, and verifiable logical backups.
                   </p>
                 </div>
               </div>

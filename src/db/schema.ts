@@ -168,6 +168,190 @@ export const userNotes = sqliteTable(
   (table) => [index('user_notes_user_idx').on(table.userId)]
 );
 
+// 2b. Unlimited Multi-App Management, API Keys, App End-Users, Events, Webhooks & Team App RBAC
+export const connectedApps = sqliteTable(
+  'connected_apps',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appUid: text('app_uid').notNull().unique(),
+    slug: text('slug').notNull().unique(),
+    name: text('name').notNull(),
+    platform: text('platform').default('android').notNull(), // android | game | website | ios | api
+    packageOrDomain: text('package_or_domain').default('').notNull(),
+    description: text('description').default('').notNull(),
+    status: text('status').default('connected').notNull(), // connected | disconnected | maintenance
+    currentVersion: text('current_version').default('1.0.0').notNull(),
+    minSupportedVersion: text('min_supported_version').default('1.0.0').notNull(),
+    forceUpdate: integer('force_update', { mode: 'boolean' }).default(false).notNull(),
+    maintenanceMessage: text('maintenance_message')
+      .default('Scheduled maintenance is in progress.')
+      .notNull(),
+    admobAppId: text('admob_app_id').default('').notNull(),
+    adsEnabled: integer('ads_enabled', { mode: 'boolean' }).default(true).notNull(),
+    webhookSecret: text('webhook_secret').default('').notNull(),
+    healthStatus: text('health_status').default('healthy').notNull(), // healthy | degraded | offline
+    lastHeartbeatAt: integer('last_heartbeat_at', { mode: 'timestamp_ms' }),
+    lastLatencyMs: integer('last_latency_ms').default(0).notNull(),
+    errorCount24h: integer('error_count_24h').default(0).notNull(),
+    settingsJson: text('settings_json', { mode: 'json' })
+      .$type<Record<string, unknown>>()
+      .default(sql`'{}'`)
+      .notNull(),
+    createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [
+    index('connected_apps_status_idx').on(table.status),
+    index('connected_apps_platform_idx').on(table.platform),
+  ]
+);
+
+export const appApiKeys = sqliteTable(
+  'app_api_keys',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id')
+      .references(() => connectedApps.id, { onDelete: 'cascade' })
+      .notNull(),
+    name: text('name').notNull(),
+    keyPrefix: text('key_prefix').notNull(),
+    keyHash: text('key_hash').notNull().unique(),
+    scopes: text('scopes', { mode: 'json' })
+      .$type<string[]>()
+      .default(sql`'["config:read","users:write","events:write","commerce:write"]'`)
+      .notNull(),
+    isActive: integer('is_active', { mode: 'boolean' }).default(true).notNull(),
+    lastUsedAt: integer('last_used_at', { mode: 'timestamp_ms' }),
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }),
+    revokedAt: integer('revoked_at', { mode: 'timestamp_ms' }),
+    createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [
+    index('app_api_keys_app_idx').on(table.appId),
+    index('app_api_keys_active_idx').on(table.isActive),
+  ]
+);
+
+export const appUsers = sqliteTable(
+  'app_users',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id')
+      .references(() => connectedApps.id, { onDelete: 'cascade' })
+      .notNull(),
+    externalUserId: text('external_user_id').notNull(),
+    email: text('email').default('').notNull(),
+    displayName: text('display_name').default('').notNull(),
+    status: text('status').default('active').notNull(), // active | banned | suspended
+    appVersion: text('app_version').default('').notNull(),
+    deviceModel: text('device_model').default('').notNull(),
+    osVersion: text('os_version').default('').notNull(),
+    country: text('country').default('').notNull(),
+    ipAddress: text('ip_address').default('').notNull(),
+    metadata: text('metadata', { mode: 'json' })
+      .$type<Record<string, unknown>>()
+      .default(sql`'{}'`)
+      .notNull(),
+    totalSessions: integer('total_sessions').default(1).notNull(),
+    lastActiveAt: integer('last_active_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [
+    uniqueIndex('app_users_app_ext_unique_idx').on(table.appId, table.externalUserId),
+    index('app_users_app_status_idx').on(table.appId, table.status),
+    index('app_users_last_active_idx').on(table.lastActiveAt),
+  ]
+);
+
+export const appEvents = sqliteTable(
+  'app_events',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id')
+      .references(() => connectedApps.id, { onDelete: 'cascade' })
+      .notNull(),
+    appUserId: integer('app_user_id').references(() => appUsers.id, { onDelete: 'set null' }),
+    eventType: text('event_type').notNull(),
+    eventName: text('event_name').notNull(),
+    severity: text('severity').default('info').notNull(), // info | warn | error | critical
+    latencyMs: integer('latency_ms').default(0).notNull(),
+    payload: text('payload', { mode: 'json' })
+      .$type<Record<string, unknown>>()
+      .default(sql`'{}'`)
+      .notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [
+    index('app_events_app_created_idx').on(table.appId, table.createdAt),
+    index('app_events_severity_idx').on(table.severity),
+    index('app_events_user_idx').on(table.appUserId),
+  ]
+);
+
+export const webhooks = sqliteTable(
+  'webhooks',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    targetUrl: text('target_url').notNull(),
+    events: text('events', { mode: 'json' }).$type<string[]>().default(sql`'["*"]'`).notNull(),
+    signingSecret: text('signing_secret').notNull(),
+    isActive: integer('is_active', { mode: 'boolean' }).default(true).notNull(),
+    lastStatusCode: integer('last_status_code'),
+    lastTriggeredAt: integer('last_triggered_at', { mode: 'timestamp_ms' }),
+    createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [index('webhooks_app_idx').on(table.appId)]
+);
+
+export const webhookDeliveries = sqliteTable(
+  'webhook_deliveries',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    webhookId: integer('webhook_id')
+      .references(() => webhooks.id, { onDelete: 'cascade' })
+      .notNull(),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
+    eventType: text('event_type').notNull(),
+    payload: text('payload', { mode: 'json' })
+      .$type<Record<string, unknown>>()
+      .default(sql`'{}'`)
+      .notNull(),
+    statusCode: integer('status_code').default(0).notNull(),
+    responseBody: text('response_body').default('').notNull(),
+    durationMs: integer('duration_ms').default(0).notNull(),
+    success: integer('success', { mode: 'boolean' }).default(false).notNull(),
+    errorMessage: text('error_message').default('').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [index('webhook_deliveries_webhook_idx').on(table.webhookId, table.createdAt)]
+);
+
+export const userAppPermissions = sqliteTable(
+  'user_app_permissions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+    appId: integer('app_id')
+      .references(() => connectedApps.id, { onDelete: 'cascade' })
+      .notNull(),
+    roleScope: text('role_scope').default('admin').notNull(), // owner | admin | editor | viewer
+    permissions: text('permissions', { mode: 'json' }).$type<string[]>().default(sql`'[]'`).notNull(),
+    grantedBy: integer('granted_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [uniqueIndex('user_app_perm_unique_idx').on(table.userId, table.appId)]
+);
+
 // 3. Content Management
 export const categories = sqliteTable('categories', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -181,6 +365,7 @@ export const contentItems = sqliteTable(
   'content_items',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
     title: text('title').notNull(),
     slug: text('slug').notNull().unique(),
     excerpt: text('excerpt').default('').notNull(),
@@ -200,6 +385,7 @@ export const contentItems = sqliteTable(
   (table) => [
     index('content_status_idx').on(table.status),
     index('content_category_idx').on(table.categoryId),
+    index('content_items_app_idx').on(table.appId),
   ]
 );
 
@@ -236,10 +422,11 @@ export const notifications = sqliteTable(
   'notifications',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
     title: text('title').notNull(),
     message: text('message').notNull(),
     channel: text('channel').default('in_app').notNull(), // in_app | email | push
-    targetType: text('target_type').default('user').notNull(), // all | role | user
+    targetType: text('target_type').default('user').notNull(), // all | all_apps | app | role | user
     targetUserId: integer('target_user_id').references(() => users.id, { onDelete: 'cascade' }),
     templateKey: text('template_key'),
     status: text('status').default('delivered').notNull(), // queued | scheduled | delivered | failed | read
@@ -253,6 +440,7 @@ export const notifications = sqliteTable(
   (table) => [
     index('notifications_user_idx').on(table.targetUserId),
     index('notifications_status_idx').on(table.status),
+    index('notifications_app_idx').on(table.appId),
   ]
 );
 
@@ -261,6 +449,7 @@ export const transactions = sqliteTable(
   'transactions',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
     reference: text('reference').notNull().unique(),
     userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
     amountCents: integer('amount_cents').notNull(),
@@ -279,32 +468,41 @@ export const transactions = sqliteTable(
   (table) => [
     index('transactions_user_idx').on(table.userId),
     index('transactions_status_idx').on(table.status),
+    index('transactions_app_idx').on(table.appId),
   ]
 );
 
 // 6. Advertisement Management
-export const adConfigs = sqliteTable('ad_configs', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  name: text('name').notNull(),
-  network: text('network').notNull(),
-  adFormat: text('ad_format').notNull(), // banner | interstitial | rewarded | native
-  placement: text('placement').notNull(),
-  frequencyCap: integer('frequency_cap').default(3).notNull(),
-  isEnabled: integer('is_enabled', { mode: 'boolean' }).default(false).notNull(),
-  visibilityRule: text('visibility_rule').default('all_users').notNull(),
-  impressions: integer('impressions').default(0).notNull(),
-  clicks: integer('clicks').default(0).notNull(),
-  revenueCents: integer('revenue_cents').default(0).notNull(),
-  errorMessage: text('error_message').default('').notNull(),
-  updatedBy: integer('updated_by').references(() => users.id, { onDelete: 'set null' }),
-  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
-});
+export const adConfigs = sqliteTable(
+  'ad_configs',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    network: text('network').notNull(),
+    adFormat: text('ad_format').notNull(), // banner | interstitial | rewarded | native
+    placement: text('placement').notNull(),
+    admobUnitId: text('admob_unit_id').default('').notNull(),
+    ecpmCents: integer('ecpm_cents').default(0).notNull(),
+    frequencyCap: integer('frequency_cap').default(3).notNull(),
+    isEnabled: integer('is_enabled', { mode: 'boolean' }).default(false).notNull(),
+    visibilityRule: text('visibility_rule').default('all_users').notNull(),
+    impressions: integer('impressions').default(0).notNull(),
+    clicks: integer('clicks').default(0).notNull(),
+    revenueCents: integer('revenue_cents').default(0).notNull(),
+    errorMessage: text('error_message').default('').notNull(),
+    updatedBy: integer('updated_by').references(() => users.id, { onDelete: 'set null' }),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [index('ad_configs_app_idx').on(table.appId)]
+);
 
 // 7. Support & Communication
 export const supportTickets = sqliteTable(
   'support_tickets',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
     ticketNumber: text('ticket_number').notNull().unique(),
     userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
     assignedTo: integer('assigned_to').references(() => users.id, { onDelete: 'set null' }),
@@ -321,6 +519,7 @@ export const supportTickets = sqliteTable(
     index('tickets_status_idx').on(table.status),
     index('tickets_user_idx').on(table.userId),
     index('tickets_assigned_idx').on(table.assignedTo),
+    index('support_tickets_app_idx').on(table.appId),
   ]
 );
 
@@ -358,29 +557,39 @@ export const systemSettings = sqliteTable('system_settings', {
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
 });
 
-export const featureFlags = sqliteTable('feature_flags', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  key: text('key').notNull().unique(),
-  name: text('name').notNull(),
-  description: text('description').default('').notNull(),
-  isEnabled: integer('is_enabled', { mode: 'boolean' }).default(false).notNull(),
-  rolloutPercentage: integer('rollout_percentage').default(100).notNull(),
-  targetRoles: text('target_roles', { mode: 'json' }).$type<string[]>().default(sql`'[]'`).notNull(),
-  updatedBy: integer('updated_by').references(() => users.id, { onDelete: 'set null' }),
-  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
-});
+export const featureFlags = sqliteTable(
+  'feature_flags',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
+    key: text('key').notNull().unique(),
+    name: text('name').notNull(),
+    description: text('description').default('').notNull(),
+    isEnabled: integer('is_enabled', { mode: 'boolean' }).default(false).notNull(),
+    rolloutPercentage: integer('rollout_percentage').default(100).notNull(),
+    targetRoles: text('target_roles', { mode: 'json' }).$type<string[]>().default(sql`'[]'`).notNull(),
+    updatedBy: integer('updated_by').references(() => users.id, { onDelete: 'set null' }),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [index('feature_flags_app_idx').on(table.appId)]
+);
 
-export const appReleases = sqliteTable('app_releases', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  version: text('version').notNull(),
-  minSupportedVersion: text('min_supported_version').notNull(),
-  forceUpdate: integer('force_update', { mode: 'boolean' }).default(false).notNull(),
-  platform: text('platform').default('web').notNull(),
-  releaseNotes: text('release_notes').default('').notNull(),
-  status: text('status').default('active').notNull(), // draft | active | rolled_back
-  createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
-});
+export const appReleases = sqliteTable(
+  'app_releases',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
+    version: text('version').notNull(),
+    minSupportedVersion: text('min_supported_version').notNull(),
+    forceUpdate: integer('force_update', { mode: 'boolean' }).default(false).notNull(),
+    platform: text('platform').default('web').notNull(),
+    releaseNotes: text('release_notes').default('').notNull(),
+    status: text('status').default('active').notNull(), // draft | active | rolled_back
+    createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [index('app_releases_app_idx').on(table.appId)]
+);
 
 // 9. File & Media Management
 export const files = sqliteTable(
@@ -437,6 +646,7 @@ export const apiLogs = sqliteTable(
   'api_logs',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
     method: text('method').notNull(),
     path: text('path').notNull(),
     statusCode: integer('status_code').notNull(),
@@ -449,6 +659,7 @@ export const apiLogs = sqliteTable(
   (table) => [
     index('api_logs_status_idx').on(table.statusCode),
     index('api_logs_created_idx').on(table.createdAt),
+    index('api_logs_app_idx').on(table.appId),
   ]
 );
 
@@ -477,26 +688,31 @@ export const backgroundJobs = sqliteTable(
   (table) => [index('jobs_status_idx').on(table.status)]
 );
 
-export const backups = sqliteTable('backups', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  filename: text('filename').notNull(),
-  type: text('type').default('manual').notNull(), // manual | scheduled | export
-  status: text('status').default('completed').notNull(), // completed | verified | failed
-  sizeBytes: integer('size_bytes').notNull(),
-  checksumSha256: text('checksum_sha256').notNull(),
-  tablesIncluded: text('tables_included', { mode: 'json' })
-    .$type<string[]>()
-    .default(sql`'[]'`)
-    .notNull(),
-  rowCount: integer('row_count').default(0).notNull(),
-  snapshotData: text('snapshot_data', { mode: 'json' })
-    .$type<Record<string, unknown[]>>()
-    .default(sql`'{}'`)
-    .notNull(),
-  verifiedAt: integer('verified_at', { mode: 'timestamp_ms' }),
-  createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
-});
+export const backups = sqliteTable(
+  'backups',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
+    filename: text('filename').notNull(),
+    type: text('type').default('manual').notNull(), // manual | scheduled | export
+    status: text('status').default('completed').notNull(), // completed | verified | failed
+    sizeBytes: integer('size_bytes').notNull(),
+    checksumSha256: text('checksum_sha256').notNull(),
+    tablesIncluded: text('tables_included', { mode: 'json' })
+      .$type<string[]>()
+      .default(sql`'[]'`)
+      .notNull(),
+    rowCount: integer('row_count').default(0).notNull(),
+    snapshotData: text('snapshot_data', { mode: 'json' })
+      .$type<Record<string, unknown[]>>()
+      .default(sql`'{}'`)
+      .notNull(),
+    verifiedAt: integer('verified_at', { mode: 'timestamp_ms' }),
+    createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [index('backups_app_idx').on(table.appId)]
+);
 
 export const savedViews = sqliteTable(
   'saved_views',

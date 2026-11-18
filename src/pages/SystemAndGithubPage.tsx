@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { GitBranch, Play, RefreshCw, Save } from 'lucide-react';
+import { AlertTriangle, GitBranch, Play, RefreshCw, Save } from 'lucide-react';
 import { apiRequest } from '../lib/api';
 import { useToast } from '../components/common/Toast';
+import { useAppScope } from '../contexts/AppScopeContext';
 import { useAuth } from '../contexts/AuthContext';
 
-export const SystemManagementPage: React.FC<{ subview: string }> = () => {
+export const SystemManagementPage: React.FC<{ subview: string }> = ({ subview }) => {
   const { hasPerm } = useAuth();
+  const { appQueryParam, selectedApp } = useAppScope();
   const { pushToast } = useToast();
   const [data, setData] = useState<{
     host: {
@@ -25,25 +27,43 @@ export const SystemManagementPage: React.FC<{ subview: string }> = () => {
       recentLogs: Array<{ id: number; method: string; path: string; statusCode: number; durationMs: number; createdAt: string }>;
       errorLogs: Array<{ id: number; method: string; path: string; statusCode: number; errorMessage: string; createdAt: string }>;
     };
+    sdkErrors?: Array<{ id: number; appId: number; eventType: string; eventName: string; severity: string; createdAt: string }>;
     jobs: Array<{ id: number; jobType: string; status: string; result: unknown; createdAt: string }>;
   } | null>(null);
 
   const loadSystem = useCallback(async () => {
-    const res = await apiRequest<NonNullable<typeof data>>('/system/overview');
-    setData(res);
-  }, []);
+    try {
+      const qs = appQueryParam ? `?appId=${encodeURIComponent(appQueryParam)}` : '';
+      const res = await apiRequest<NonNullable<typeof data>>(`/system/overview${qs}`);
+      setData(res);
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'System telemetry load failed',
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  }, [appQueryParam, pushToast]);
 
   useEffect(() => {
     void loadSystem();
   }, [loadSystem]);
 
   const runJob = async (jobType: string) => {
-    await apiRequest('/system/jobs', {
-      method: 'POST',
-      body: JSON.stringify({ jobType }),
-    });
-    pushToast({ type: 'success', title: `Background job completed: ${jobType}` });
-    await loadSystem();
+    try {
+      await apiRequest('/system/jobs', {
+        method: 'POST',
+        body: JSON.stringify({ jobType, appId: selectedApp ? selectedApp.id : null }),
+      });
+      pushToast({ type: 'success', title: `Background job completed: ${jobType}` });
+      await loadSystem();
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: `Background job failed: ${jobType}`,
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
   };
 
   if (!data) {
@@ -51,20 +71,25 @@ export const SystemManagementPage: React.FC<{ subview: string }> = () => {
   }
 
   const activeConnections = data.api.activeConnections ?? data.api.activeSseConnections ?? 0;
+  const showJobs = subview === 'system-health' || subview === 'system-jobs' || subview === 'system-maintenance';
+  const showErrors = subview === 'system-health' || subview === 'system-logs';
+  const showLogs = subview === 'system-health' || subview === 'system-logs' || subview === 'system-api';
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-xl font-semibold">System Management</h1>
           <p className="mt-0.5 text-xs text-slate-500">
-            Live Cloudflare Workers runtime, D1 SQLite latency, HTTP request telemetry, and maintenance job execution.
+            {selectedApp
+              ? `Cloudflare Workers & D1 telemetry filtered for ${selectedApp.name}.`
+              : 'Live Cloudflare Workers runtime, D1 SQLite latency, HTTP/SDK error telemetry, and maintenance job execution.'}
           </p>
         </div>
         <button
           type="button"
           onClick={() => void loadSystem()}
-          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium dark:border-slate-700 dark:bg-slate-900"
+          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
         >
           <RefreshCw className="h-3.5 w-3.5" />
           Refresh
@@ -98,11 +123,12 @@ export const SystemManagementPage: React.FC<{ subview: string }> = () => {
         </div>
       </div>
 
-      {hasPerm('system.manage') && (
+      {showJobs && hasPerm('system.manage') && (
         <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-          <h2 className="font-display text-sm font-semibold">Maintenance & Background Jobs</h2>
+          <h2 className="font-display text-sm font-semibold">Maintenance & Automated Backup Jobs</h2>
           <div className="mt-3 flex flex-wrap gap-2">
             {[
+              { id: 'auto_backup', label: 'Run Scheduled Auto-Backup' },
               { id: 'audit_verify', label: 'Verify Audit Hash Chain' },
               { id: 'session_cleanup', label: 'Prune Expired Sessions' },
               { id: 'log_prune', label: 'Enforce 30-Day API Log Retention' },
@@ -120,49 +146,82 @@ export const SystemManagementPage: React.FC<{ subview: string }> = () => {
           </div>
           <ul className="mt-4 divide-y divide-slate-100 text-xs dark:divide-slate-800">
             {data.jobs.slice(0, 8).map((j) => (
-              <li key={j.id} className="flex justify-between py-2 font-mono">
+              <li key={j.id} className="flex flex-wrap justify-between gap-2 py-2 font-mono">
                 <span>
                   #{j.id} {j.jobType} · {j.status}
                 </span>
-                <span className="text-slate-400">{JSON.stringify(j.result)}</span>
+                <span className="truncate max-w-md text-slate-400">{JSON.stringify(j.result)}</span>
               </li>
             ))}
           </ul>
         </section>
       )}
 
-      <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-        <h2 className="font-display text-sm font-semibold mb-3">Recent API Telemetry Logs</h2>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left font-mono text-xs">
-            <thead>
-              <tr className="border-b border-slate-200 text-slate-500 dark:border-slate-800">
-                <th className="py-2">Method</th>
-                <th className="py-2">Path</th>
-                <th className="py-2">Status</th>
-                <th className="py-2 text-right">Duration</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {data.api.recentLogs.slice(0, 20).map((l) => (
-                <tr key={l.id}>
-                  <td className="py-1.5">{l.method}</td>
-                  <td className="py-1.5">{l.path}</td>
-                  <td className={`py-1.5 ${l.statusCode >= 400 ? 'text-red-600' : 'text-emerald-600'}`}>
-                    {l.statusCode}
-                  </td>
-                  <td className="py-1.5 text-right tabular-nums">{l.durationMs} ms</td>
+      {showErrors && (data.api.errorLogs.length > 0 || (data.sdkErrors && data.sdkErrors.length > 0)) && (
+        <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex items-center gap-2 mb-3">
+            <AlertTriangle className="h-4 w-4 text-amber-600" />
+            <h2 className="font-display text-sm font-semibold">
+              Recorded HTTP 4xx/5xx & SDK Error Events ({data.api.errorLogs.length + (data.sdkErrors?.length ?? 0)})
+            </h2>
+          </div>
+          <div className="divide-y divide-slate-100 font-mono text-xs dark:divide-slate-800">
+            {data.api.errorLogs.slice(0, 10).map((err) => (
+              <div key={`http-${err.id}`} className="flex flex-wrap justify-between gap-2 py-2">
+                <span>
+                  {err.method} {err.path}
+                </span>
+                <span className="text-red-600">
+                  HTTP {err.statusCode} {err.errorMessage ? `· ${err.errorMessage}` : ''}
+                </span>
+              </div>
+            ))}
+            {(data.sdkErrors || []).slice(0, 10).map((sdkErr) => (
+              <div key={`sdk-${sdkErr.id}`} className="flex flex-wrap justify-between gap-2 py-2">
+                <span>
+                  App #{sdkErr.appId} · {sdkErr.eventName}
+                </span>
+                <span className="text-amber-600 uppercase">{sdkErr.severity}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {showLogs && (
+        <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+          <h2 className="font-display text-sm font-semibold mb-3">Recent API Telemetry Logs</h2>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left font-mono text-xs">
+              <thead>
+                <tr className="border-b border-slate-200 text-slate-500 dark:border-slate-800">
+                  <th className="py-2">Method</th>
+                  <th className="py-2">Path</th>
+                  <th className="py-2">Status</th>
+                  <th className="py-2 text-right">Duration</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {data.api.recentLogs.slice(0, 20).map((l) => (
+                  <tr key={l.id}>
+                    <td className="py-1.5">{l.method}</td>
+                    <td className="py-1.5">{l.path}</td>
+                    <td className={`py-1.5 ${l.statusCode >= 400 ? 'text-red-600' : 'text-emerald-600'}`}>
+                      {l.statusCode}
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums">{l.durationMs} ms</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
     </div>
   );
 };
 
-export const GithubCenterPage: React.FC<{ subview: string }> = () => {
+export const GithubCenterPage: React.FC<{ subview: string }> = ({ subview }) => {
   const { hasPerm } = useAuth();
   const { pushToast } = useToast();
   const [repoInput, setRepoInput] = useState('');
@@ -200,13 +259,24 @@ export const GithubCenterPage: React.FC<{ subview: string }> = () => {
 
   const saveRepo = async (e: React.FormEvent) => {
     e.preventDefault();
-    await apiRequest('/github/repository', {
-      method: 'PUT',
-      body: JSON.stringify({ repository: repoInput }),
-    });
-    pushToast({ type: 'success', title: 'GitHub repository updated' });
-    await loadGithub();
+    try {
+      await apiRequest('/github/repository', {
+        method: 'PUT',
+        body: JSON.stringify({ repository: repoInput }),
+      });
+      pushToast({ type: 'success', title: 'GitHub repository updated' });
+      await loadGithub();
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Failed to update GitHub repository',
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
   };
+
+  const showRepoCol = subview !== 'github-actions' && subview !== 'github-releases';
+  const showActionsCol = subview === 'github-repo' || subview === 'github-actions' || subview === 'github-releases';
 
   return (
     <div className="space-y-6">
@@ -255,70 +325,74 @@ export const GithubCenterPage: React.FC<{ subview: string }> = () => {
 
       {ghData?.repo && (
         <div className="grid gap-6 lg:grid-cols-2">
-          <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-            <h2 className="font-display text-sm font-semibold">
-              {ghData.repo.full_name} · Default branch: {ghData.repo.default_branch}
-            </h2>
-            <p className="mt-1 text-xs text-slate-500">
-              Branches ({ghData.branches?.length ?? 0}): {(ghData.branches || []).map((b) => b.name).join(', ')}
-            </p>
-            <h3 className="mt-4 text-xs font-semibold">Recent Commits</h3>
-            <ul className="mt-2 divide-y divide-slate-100 text-xs dark:divide-slate-800">
-              {(ghData.commits || []).slice(0, 6).map((c) => (
-                <li key={c.sha} className="py-2">
-                  <p className="truncate font-medium">{c.commit.message}</p>
-                  <p className="font-mono text-[11px] text-slate-500">
-                    {c.sha.slice(0, 7)} · {c.commit.author.name}
-                  </p>
-                </li>
-              ))}
-            </ul>
-            <h3 className="mt-4 text-xs font-semibold">Pull Requests</h3>
-            <ul className="mt-2 divide-y divide-slate-100 text-xs dark:divide-slate-800">
-              {(ghData.pulls || []).slice(0, 5).map((pr) => (
-                <li key={pr.id} className="flex justify-between py-2">
-                  <span className="truncate">#{pr.number} {pr.title}</span>
-                  <span className="font-mono capitalize text-slate-500">{pr.state}</span>
-                </li>
-              ))}
-              {(ghData.pulls || []).length === 0 && (
-                <li className="py-2 text-slate-500">No pull requests returned.</li>
-              )}
-            </ul>
-          </section>
+          {showRepoCol && (
+            <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+              <h2 className="font-display text-sm font-semibold">
+                {ghData.repo.full_name} · Default branch: {ghData.repo.default_branch}
+              </h2>
+              <p className="mt-1 text-xs text-slate-500">
+                Branches ({ghData.branches?.length ?? 0}): {(ghData.branches || []).map((b) => b.name).join(', ')}
+              </p>
+              <h3 className="mt-4 text-xs font-semibold">Recent Commits</h3>
+              <ul className="mt-2 divide-y divide-slate-100 text-xs dark:divide-slate-800">
+                {(ghData.commits || []).slice(0, 6).map((c) => (
+                  <li key={c.sha} className="py-2">
+                    <p className="truncate font-medium">{c.commit.message}</p>
+                    <p className="font-mono text-[11px] text-slate-500">
+                      {c.sha.slice(0, 7)} · {c.commit.author.name}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+              <h3 className="mt-4 text-xs font-semibold">Pull Requests</h3>
+              <ul className="mt-2 divide-y divide-slate-100 text-xs dark:divide-slate-800">
+                {(ghData.pulls || []).slice(0, 5).map((pr) => (
+                  <li key={pr.id} className="flex justify-between py-2">
+                    <span className="truncate">#{pr.number} {pr.title}</span>
+                    <span className="font-mono capitalize text-slate-500">{pr.state}</span>
+                  </li>
+                ))}
+                {(ghData.pulls || []).length === 0 && (
+                  <li className="py-2 text-slate-500">No pull requests returned.</li>
+                )}
+              </ul>
+            </section>
+          )}
 
-          <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-            <h2 className="font-display text-sm font-semibold">GitHub Actions, Releases & Deployments</h2>
-            <ul className="mt-3 divide-y divide-slate-100 text-xs dark:divide-slate-800">
-              {(ghData.workflows || []).slice(0, 6).map((w) => (
-                <li key={w.id} className="flex justify-between py-2">
-                  <span>{w.name}</span>
-                  <span className="font-mono">{w.conclusion || w.status}</span>
-                </li>
-              ))}
-              {(ghData.workflows || []).length === 0 && (
-                <li className="py-3 text-slate-500">No workflow runs returned.</li>
-              )}
-            </ul>
-            <h3 className="mt-4 text-xs font-semibold">Releases & Deployments</h3>
-            <ul className="mt-2 divide-y divide-slate-100 text-xs dark:divide-slate-800">
-              {(ghData.releases || []).slice(0, 4).map((rel) => (
-                <li key={rel.id} className="flex justify-between py-2">
-                  <span className="font-mono">{rel.tag_name}</span>
-                  <span className="text-slate-500">{rel.name || 'Release'}</span>
-                </li>
-              ))}
-              {(ghData.deployments || []).slice(0, 4).map((dep) => (
-                <li key={dep.id} className="flex justify-between py-2">
-                  <span>Env: {dep.environment}</span>
-                  <span className="font-mono text-slate-500">{dep.ref}</span>
-                </li>
-              ))}
-              {(ghData.releases || []).length === 0 && (ghData.deployments || []).length === 0 && (
-                <li className="py-2 text-slate-500">No releases or deployments recorded.</li>
-              )}
-            </ul>
-          </section>
+          {showActionsCol && (
+            <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+              <h2 className="font-display text-sm font-semibold">GitHub Actions, Releases & Deployments</h2>
+              <ul className="mt-3 divide-y divide-slate-100 text-xs dark:divide-slate-800">
+                {(ghData.workflows || []).slice(0, 6).map((w) => (
+                  <li key={w.id} className="flex justify-between py-2">
+                    <span>{w.name}</span>
+                    <span className="font-mono">{w.conclusion || w.status}</span>
+                  </li>
+                ))}
+                {(ghData.workflows || []).length === 0 && (
+                  <li className="py-3 text-slate-500">No workflow runs returned.</li>
+                )}
+              </ul>
+              <h3 className="mt-4 text-xs font-semibold">Releases & Deployments</h3>
+              <ul className="mt-2 divide-y divide-slate-100 text-xs dark:divide-slate-800">
+                {(ghData.releases || []).slice(0, 4).map((rel) => (
+                  <li key={rel.id} className="flex justify-between py-2">
+                    <span className="font-mono">{rel.tag_name}</span>
+                    <span className="text-slate-500">{rel.name || 'Release'}</span>
+                  </li>
+                ))}
+                {(ghData.deployments || []).slice(0, 4).map((dep) => (
+                  <li key={dep.id} className="flex justify-between py-2">
+                    <span>Env: {dep.environment}</span>
+                    <span className="font-mono text-slate-500">{dep.ref}</span>
+                  </li>
+                ))}
+                {(ghData.releases || []).length === 0 && (ghData.deployments || []).length === 0 && (
+                  <li className="py-2 text-slate-500">No releases or deployments recorded.</li>
+                )}
+              </ul>
+            </section>
+          )}
         </div>
       )}
 
@@ -329,7 +403,7 @@ export const GithubCenterPage: React.FC<{ subview: string }> = () => {
         <p className="mt-2 leading-relaxed text-slate-600 dark:text-slate-400">
           The full-stack Aegis Enterprise Console runs on Cloudflare Workers free tier (
           <code className="font-mono">workers.dev</code>) with Workers Static Assets for the React
-          SPA and Cloudflare D1 SQLite for relational persistence across all 26 tables — zero paid
+          SPA and Cloudflare D1 SQLite for relational persistence across all 33 tables — zero paid
           cloud databases or Node servers required. <code className="font-mono">.github/workflows/ci.yml</code> and{' '}
           <code className="font-mono">deploy-cloudflare.yml</code> automate D1 migration validation,
           typechecking, unit/API tests, builds, and tag/SHA rollback deployments.

@@ -75,8 +75,15 @@ export const SYSTEM_PERMISSIONS: PermissionDefinition[] = [
   { key: 'github.manage', module: 'github', page: 'repo_connection', action: 'manage', description: 'Configure connected GitHub repository and release metadata' },
 
   // Database Management (Restricted)
-  { key: 'database.read', module: 'database', page: 'db_overview', action: 'read', description: 'Inspect PostgreSQL schema metadata and backup history' },
-  { key: 'database.inspect', module: 'database', page: 'records', action: 'manage', description: 'Browse table records, create/verify/restore backups, and import/export' },
+  { key: 'database.read', module: 'database', page: 'db_overview', action: 'read', description: 'Inspect SQLite D1 schema metadata and backup history' },
+  { key: 'database.inspect', module: 'database', page: 'records', action: 'manage', description: 'Browse table records, create/verify backups, and export' },
+  { key: 'database.restore', module: 'database', page: 'backups', action: 'manage', description: 'Restore backups and import full database snapshots' },
+
+  // Multi-App & SDK Management
+  { key: 'apps.read', module: 'apps', page: 'apps_directory', action: 'read', description: 'View connected apps, end-users, health, and error telemetry' },
+  { key: 'apps.manage', module: 'apps', page: 'apps_connect', action: 'manage', description: 'Connect, configure, disconnect, and manage apps and end-users' },
+  { key: 'apps.keys', module: 'apps', page: 'apps_api_keys', action: 'manage', description: 'Generate, rotate, and revoke per-app SDK API keys' },
+  { key: 'webhooks.manage', module: 'apps', page: 'apps_webhooks', action: 'manage', description: 'Create, test, and manage outbound HMAC-signed webhooks' },
 
   // File & Media Management
   { key: 'files.read', module: 'files', page: 'file_explorer', action: 'read', description: 'Browse files, metadata, and storage usage' },
@@ -98,7 +105,7 @@ export const SYSTEM_ROLES: RoleDefinition[] = [
   {
     slug: 'super_admin',
     name: 'Super Admin',
-    description: 'Unrestricted enterprise governance including database inspection, RBAC, backups, and security policies.',
+    description: 'Unrestricted enterprise governance including database inspection, restore, multi-app SDK keys, RBAC, and security policies.',
     hierarchyLevel: 100,
     isSystem: true,
     permissions: ALL_KEYS,
@@ -106,21 +113,22 @@ export const SYSTEM_ROLES: RoleDefinition[] = [
   {
     slug: 'admin',
     name: 'Admin',
-    description: 'Full operational administration across users, content, finance, support, and monitoring; restricted from raw database record dumps.',
+    description: 'Full operational administration across connected apps, users, content, finance, support, and monitoring; restricted from raw database dumps and restores.',
     hierarchyLevel: 80,
     isSystem: true,
-    permissions: ALL_KEYS.filter((k) => k !== 'database.inspect'),
+    permissions: ALL_KEYS.filter((k) => k !== 'database.inspect' && k !== 'database.restore'),
   },
   {
     slug: 'manager',
     name: 'Manager',
-    description: 'Operational oversight for content publishing, notifications, analytics, support escalation, and team workflows.',
+    description: 'Operational oversight for connected apps, content publishing, notifications, analytics, support escalation, and team workflows.',
     hierarchyLevel: 60,
     isSystem: true,
     permissions: [
       'dashboard.read',
       'dashboard.customize',
       'analytics.read',
+      'apps.read',
       'users.read',
       'users.write',
       'users.export',

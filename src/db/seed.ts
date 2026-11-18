@@ -353,16 +353,21 @@ async function runStructuralSeed(d1: D1Database, defaultGithubRepo = ''): Promis
     if (row.slug) roleIdBySlug.set(row.slug, row.id);
   }
 
-  // Link role permissions via batch for newly created roles & super_admin
+  // Link role permissions via batch for newly created roles & core system roles when upgrading permissions
   const batchTwo: D1PreparedStatement[] = [];
   const rpStmt = d1.prepare(
     `INSERT OR IGNORE INTO role_permissions (role_id, permission_id, created_at) VALUES (?, ?, ?)`
   );
+  const permsUpgraded = Number(fastCheck?.perms_count ?? 0) < SYSTEM_PERMISSIONS.length;
   for (const roleDef of SYSTEM_ROLES) {
     const roleId = roleIdBySlug.get(roleDef.slug);
     if (!roleId) continue;
     const isNewRole = !preExistingRoleSlugs.has(roleDef.slug);
-    if (!isNewRole && roleDef.slug !== 'super_admin') continue;
+    const shouldSyncSystemRole =
+      isNewRole ||
+      roleDef.slug === 'super_admin' ||
+      (permsUpgraded && (roleDef.slug === 'admin' || roleDef.slug === 'manager'));
+    if (!shouldSyncSystemRole) continue;
 
     for (const permKey of roleDef.permissions) {
       const permId = permIdByKey.get(permKey);

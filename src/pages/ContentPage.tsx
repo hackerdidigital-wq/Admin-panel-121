@@ -3,10 +3,12 @@ import { Check, History, Plus, Trash2 } from 'lucide-react';
 import { apiRequest } from '../lib/api';
 import { DataTable, type TableColumn } from '../components/common/DataTable';
 import { useToast } from '../components/common/Toast';
+import { useAppScope } from '../contexts/AppScopeContext';
 import { useAuth } from '../contexts/AuthContext';
 
 interface ContentRow {
   id: number;
+  appId?: number | null;
   title: string;
   slug: string;
   excerpt: string;
@@ -29,6 +31,7 @@ interface CategoryRow {
 
 export const ContentPage: React.FC<{ subview: string }> = ({ subview }) => {
   const { hasPerm } = useAuth();
+  const { appQueryParam, selectedApp } = useAppScope();
   const { pushToast } = useToast();
   const [rows, setRows] = useState<ContentRow[]>([]);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
@@ -78,6 +81,7 @@ export const ContentPage: React.FC<{ subview: string }> = ({ subview }) => {
         search,
         status: statusFilter,
       });
+      if (appQueryParam) qs.set('appId', appQueryParam);
       const res = await apiRequest<{
         data: ContentRow[];
         total: number;
@@ -95,7 +99,7 @@ export const ContentPage: React.FC<{ subview: string }> = ({ subview }) => {
     } finally {
       setLoading(false);
     }
-  }, [page, search, statusFilter, pushToast]);
+  }, [page, search, statusFilter, appQueryParam, pushToast]);
 
   useEffect(() => {
     void loadContent();
@@ -116,6 +120,7 @@ export const ContentPage: React.FC<{ subview: string }> = ({ subview }) => {
     e.preventDefault();
     try {
       const payload = {
+        appId: selectedApp ? selectedApp.id : null,
         title,
         body,
         excerpt,
@@ -151,32 +156,73 @@ export const ContentPage: React.FC<{ subview: string }> = ({ subview }) => {
   };
 
   const viewVersions = async (item: ContentRow) => {
-    const res = await apiRequest<{
-      versions: Array<{ id: number; version: number; title: string; changeSummary: string; createdAt: string }>;
-    }>(`/content/${item.id}/versions`);
-    setVersionsFor({ title: item.title, items: res.versions });
+    try {
+      const res = await apiRequest<{
+        versions: Array<{ id: number; version: number; title: string; changeSummary: string; createdAt: string }>;
+      }>(`/content/${item.id}/versions`);
+      setVersionsFor({ title: item.title, items: res.versions });
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Version lookup failed',
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
   };
 
   const bulkPublish = async () => {
-    await apiRequest('/content/bulk-publish', {
-      method: 'POST',
-      body: JSON.stringify({ ids: selectedIds }),
-    });
-    pushToast({ type: 'success', title: `Published ${selectedIds.length} item(s)` });
-    setSelectedIds([]);
-    await loadContent();
+    try {
+      await apiRequest('/content/bulk-publish', {
+        method: 'POST',
+        body: JSON.stringify({ ids: selectedIds }),
+      });
+      pushToast({ type: 'success', title: `Published ${selectedIds.length} item(s)` });
+      setSelectedIds([]);
+      await loadContent();
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Bulk publish failed',
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
   };
 
   const createCategory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!catName.trim()) return;
-    await apiRequest('/categories', {
-      method: 'POST',
-      body: JSON.stringify({ name: catName }),
-    });
-    setCatName('');
-    pushToast({ type: 'success', title: 'Category created' });
-    await loadContent();
+    try {
+      await apiRequest('/categories', {
+        method: 'POST',
+        body: JSON.stringify({ name: catName }),
+      });
+      setCatName('');
+      pushToast({ type: 'success', title: 'Category created' });
+      await loadContent();
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Failed to create category',
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+
+  const updateRowStatus = async (id: number, nextStatus: string, label: string) => {
+    try {
+      await apiRequest(`/content/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      pushToast({ type: 'success', title: label });
+      await loadContent();
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Status update failed',
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
   };
 
   if (subview === 'content-categories') {
@@ -249,12 +295,7 @@ export const ContentPage: React.FC<{ subview: string }> = ({ subview }) => {
           {hasPerm('content.publish') && r.status !== 'published' && (
             <button
               type="button"
-              onClick={() =>
-                void apiRequest(`/content/${r.id}`, {
-                  method: 'PATCH',
-                  body: JSON.stringify({ status: 'published' }),
-                }).then(() => loadContent())
-              }
+              onClick={() => void updateRowStatus(r.id, 'published', 'Content published')}
               className="rounded bg-emerald-600 px-2 py-1 text-xs text-white"
             >
               <Check className="inline h-3.5 w-3.5 mr-1" />
@@ -264,12 +305,7 @@ export const ContentPage: React.FC<{ subview: string }> = ({ subview }) => {
           {hasPerm('content.delete') && r.status !== 'trash' && (
             <button
               type="button"
-              onClick={() =>
-                void apiRequest(`/content/${r.id}`, {
-                  method: 'PATCH',
-                  body: JSON.stringify({ status: 'trash' }),
-                }).then(() => loadContent())
-              }
+              onClick={() => void updateRowStatus(r.id, 'trash', 'Moved content to trash')}
               aria-label={`Move ${r.title} to trash`}
               className="rounded border border-red-200 px-2 py-1 text-xs text-red-600 dark:border-red-900"
             >
@@ -289,7 +325,9 @@ export const ContentPage: React.FC<{ subview: string }> = ({ subview }) => {
             Content Management
           </h1>
           <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-            Create, review, schedule, version, and publish structured entries.
+            {selectedApp
+              ? `Scoped to ${selectedApp.name} · Create, review, schedule, and publish in-app notices & articles.`
+              : 'Create, review, schedule, version, and publish structured entries.'}
           </p>
         </div>
         {hasPerm('content.write') && (
