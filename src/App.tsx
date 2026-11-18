@@ -15,6 +15,7 @@ import { SIDEBAR_MODULES } from './config/navigation';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { AppsCenterPage } from './pages/AppsCenterPage';
+import { AppWorkspacePage } from './pages/AppWorkspacePage';
 import { UsersPage } from './pages/UsersPage';
 import { UserDetailPage } from './pages/UserDetailPage';
 import { RolesPage } from './pages/RolesPage';
@@ -82,6 +83,9 @@ function getInitialView(): string {
 }
 
 function findRequiredPermission(viewId: string): string | string[] | undefined {
+  if (viewId.startsWith('app-workspace:')) {
+    return 'apps.read';
+  }
   if (viewId.startsWith('user-detail:')) {
     return 'users.read';
   }
@@ -188,6 +192,16 @@ const AdminWorkspace: React.FC = () => {
     }
     if (activeView === 'overview-activity') {
       return <DashboardPage mode="activity" onNavigate={navigate} />;
+    }
+    if (activeView.startsWith('app-workspace:')) {
+      const workspaceAppId = Number(activeView.split(':')[1]);
+      return (
+        <AppWorkspacePage
+          appId={workspaceAppId}
+          onBack={() => navigate('apps-directory')}
+          onNavigate={navigate}
+        />
+      );
     }
     if (activeView.startsWith('apps-')) {
       return <AppsCenterPage subview={activeView} onNavigate={navigate} />;

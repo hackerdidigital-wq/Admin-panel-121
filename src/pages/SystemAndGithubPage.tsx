@@ -403,7 +403,7 @@ export const GithubCenterPage: React.FC<{ subview: string }> = ({ subview }) => 
         <p className="mt-2 leading-relaxed text-slate-600 dark:text-slate-400">
           The full-stack Aegis Enterprise Console runs on Cloudflare Workers free tier (
           <code className="font-mono">workers.dev</code>) with Workers Static Assets for the React
-          SPA and Cloudflare D1 SQLite for relational persistence across all 33 tables — zero paid
+          SPA and Cloudflare D1 SQLite for relational persistence across all 36 tables — zero paid
           cloud databases or Node servers required. <code className="font-mono">.github/workflows/ci.yml</code> and{' '}
           <code className="font-mono">deploy-cloudflare.yml</code> automate D1 migration validation,
           typechecking, unit/API tests, builds, and tag/SHA rollback deployments.

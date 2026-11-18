@@ -10,7 +10,10 @@ import {
   Plus,
   RefreshCw,
   RotateCw,
+  SearchCode,
   ShieldAlert,
+  ShieldCheck,
+  Terminal,
   Trash2,
   UserPlus,
   Webhook,
@@ -163,7 +166,44 @@ interface TeamPermissionsResponse {
   }>;
 }
 
-const KEY_SCOPE_OPTIONS = ['config:read', 'users:write', 'events:write', 'commerce:write'] as const;
+interface InspectReport {
+  inspectedAt: string;
+  platform: string;
+  integrationMode: 'aegis_managed' | 'external_backend' | 'hybrid';
+  backendNamespace: string;
+  fullControlAvailable: boolean;
+  controlLevel: 'full_managed' | 'verified_remote' | 'partial_unverified' | 'read_only';
+  honestySummary: string;
+  verifiedCapabilities: string[];
+  missingCapabilities: string[];
+  discoveredEndpoints: Array<{ method: string; path: string; summary: string; verified: boolean }>;
+  recommendedModules: string[];
+  proposedCollections: Array<{
+    slug: string;
+    name: string;
+    description: string;
+    fields: Array<{ name: string; label: string; type: 'text' | 'number' | 'boolean' | 'json'; required: boolean }>;
+    migrationSql: string;
+  }>;
+  probeDetails: {
+    attempted: boolean;
+    reachable: boolean;
+    httpStatus: number | null;
+    sourceType: string;
+    notes: string[];
+  };
+}
+
+const KEY_SCOPE_OPTIONS = [
+  'config:read',
+  'users:write',
+  'events:write',
+  'commerce:write',
+  'data:read',
+  'data:write',
+  'storage:write',
+  'admin:sync',
+] as const;
 const WEBHOOK_EVENT_OPTIONS = [
   'app_user.created',
   'app_user.banned',
@@ -229,6 +269,15 @@ export const AppsCenterPage: React.FC<{
   const [newAdmobId, setNewAdmobId] = useState('');
   const [newKeyName, setNewKeyName] = useState('Primary Production Key');
   const [newScopes, setNewScopes] = useState<string[]>([...KEY_SCOPE_OPTIONS]);
+  const [integrationMode, setIntegrationMode] = useState<'aegis_managed' | 'hybrid' | 'external_backend'>('aegis_managed');
+  const [backendBaseUrl, setBackendBaseUrl] = useState('');
+  const [manifestUrl, setManifestUrl] = useState('');
+  const [modelsText, setModelsText] = useState('');
+  const [openapiText, setOpenapiText] = useState('');
+  const [inspectingApp, setInspectingApp] = useState(false);
+  const [inspectReport, setInspectReport] = useState<InspectReport | null>(null);
+  const [inspectSnippets, setInspectSnippets] = useState<Record<'website' | 'android' | 'unity' | 'ios' | 'curl', string> | null>(null);
+  const [activeSnippetTab, setActiveSnippetTab] = useState<'website' | 'android' | 'unity' | 'ios' | 'curl'>('website');
   const [creatingApp, setCreatingApp] = useState(false);
   const [createdCredentials, setCreatedCredentials] = useState<{
     app: ConnectedAppRecord;
@@ -430,8 +479,50 @@ export const AppsCenterPage: React.FC<{
     }
   };
 
-  // ---------------- SUBVIEW: APPS CONNECT & SDK ----------------
+  // ---------------- SUBVIEW: UNIVERSAL APP ONBOARDING WIZARD & SDK ----------------
   if (subview === 'apps-connect') {
+    const handleInspectApp = async () => {
+      setInspectingApp(true);
+      try {
+        const res = await apiRequest<{
+          report: InspectReport;
+          snippets: Record<'website' | 'android' | 'unity' | 'ios' | 'curl', string>;
+        }>('/apps/inspect', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: newName.trim() || 'New Application',
+            platform: newPlatform,
+            packageOrDomain: newPkg.trim(),
+            integrationMode,
+            backendBaseUrl: backendBaseUrl.trim(),
+            manifestUrl: manifestUrl.trim(),
+            modelsText: modelsText.trim(),
+            openapiSpec: openapiText.trim() || undefined,
+          }),
+        });
+        setInspectReport(res.report);
+        setInspectSnippets(res.snippets);
+        if (newPlatform === 'unity' || newPlatform === 'game') setActiveSnippetTab('unity');
+        else if (newPlatform === 'android') setActiveSnippetTab('android');
+        else if (newPlatform === 'ios') setActiveSnippetTab('ios');
+        else if (newPlatform === 'api') setActiveSnippetTab('curl');
+        else setActiveSnippetTab('website');
+        pushToast({
+          type: res.report.fullControlAvailable ? 'success' : 'info',
+          title: 'Capability inspection completed',
+          description: res.report.honestySummary,
+        });
+      } catch (err) {
+        pushToast({
+          type: 'error',
+          title: 'Capability inspection failed',
+          description: err instanceof Error ? err.message : undefined,
+        });
+      } finally {
+        setInspectingApp(false);
+      }
+    };
+
     const handleConnectApp = async (e: React.FormEvent) => {
       e.preventDefault();
       setCreatingApp(true);
@@ -452,6 +543,13 @@ export const AppsCenterPage: React.FC<{
             initialKeyName: newKeyName,
             scopes: newScopes,
             createInitialKey: true,
+            integrationMode,
+            backendBaseUrl: backendBaseUrl.trim(),
+            manifestUrl: manifestUrl.trim(),
+            modelsText: modelsText.trim(),
+            discoveredCapabilities: inspectReport ?? undefined,
+            enabledModules: inspectReport?.recommendedModules ?? undefined,
+            proposedCollections: inspectReport?.proposedCollections ?? undefined,
           }),
         });
         setCreatedCredentials({ app: res.app, apiKey: res.initialApiKey });
@@ -462,7 +560,11 @@ export const AppsCenterPage: React.FC<{
         setNewPkg('');
         setNewDesc('');
         setNewAdmobId('');
-        pushToast({ type: 'success', title: `Connected "${res.app.name}"` });
+        setBackendBaseUrl('');
+        setManifestUrl('');
+        setModelsText('');
+        setOpenapiText('');
+        pushToast({ type: 'success', title: `Connected "${res.app.name}" & provisioned backend` });
         await refreshApps();
       } catch (err) {
         pushToast({
@@ -478,47 +580,33 @@ export const AppsCenterPage: React.FC<{
     const activeUidForSnippets = sdkTestAppUid || createdCredentials?.app.appUid || apps[0]?.appUid || 'app_your_uid';
     const activeKeyForSnippets = sdkTestKey || createdCredentials?.apiKey || 'aegis_live_YOUR_API_KEY';
 
-    const curlSnippet = `curl -s "${apiBaseOrigin}/api/v1/sdk/config" \\
-  -H "X-App-Id: ${activeUidForSnippets}" \\
-  -H "X-API-Key: ${activeKeyForSnippets}"`;
-
-    const webSnippet = `const res = await fetch("${apiBaseOrigin}/api/v1/sdk/config", {
-  headers: {
-    "X-App-Id": "${activeUidForSnippets}",
-    "X-API-Key": "${activeKeyForSnippets}"
-  }
-});
-const config = await res.json();
-// Sync end-user & block banned accounts (returns HTTP 403 if banned):
-await fetch("${apiBaseOrigin}/api/v1/sdk/users/sync", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "X-App-Id": "${activeUidForSnippets}",
-    "X-API-Key": "${activeKeyForSnippets}"
-  },
-  body: JSON.stringify({ externalUserId: "usr_123", email: "player@example.com", appVersion: "1.0.0" })
-});`;
-
-    const kotlinSnippet = `val client = OkHttpClient()
-val req = Request.Builder()
-  .url("${apiBaseOrigin}/api/v1/sdk/config")
-  .addHeader("X-App-Id", "${activeUidForSnippets}")
-  .addHeader("X-API-Key", "${activeKeyForSnippets}")
-  .build()
-client.newCall(req).execute().use { resp ->
-  if (resp.isSuccessful) { /* Apply maintenance, forceUpdate, featureFlags, ads */ }
-}`;
+    const generatedSnippets = {
+      curl:
+        inspectSnippets?.curl?.replace(/app_generated_on_connect/g, activeUidForSnippets).replace(/aegis_live_ISSUED_ON_CONNECT/g, activeKeyForSnippets) ||
+        `curl -s "${apiBaseOrigin}/api/v1/sdk/config" \\\n  -H "X-App-Id: ${activeUidForSnippets}" \\\n  -H "X-API-Key: ${activeKeyForSnippets}"`,
+      website:
+        inspectSnippets?.website?.replace(/app_generated_on_connect/g, activeUidForSnippets).replace(/aegis_live_ISSUED_ON_CONNECT/g, activeKeyForSnippets) ||
+        `const res = await fetch("${apiBaseOrigin}/api/v1/sdk/config", {\n  headers: {\n    "X-App-Id": "${activeUidForSnippets}",\n    "X-API-Key": "${activeKeyForSnippets}"\n  }\n});\nconst config = await res.json();`,
+      android:
+        inspectSnippets?.android?.replace(/app_generated_on_connect/g, activeUidForSnippets).replace(/aegis_live_ISSUED_ON_CONNECT/g, activeKeyForSnippets) ||
+        `val client = OkHttpClient()\nval req = Request.Builder()\n  .url("${apiBaseOrigin}/api/v1/sdk/config")\n  .addHeader("X-App-Id", "${activeUidForSnippets}")\n  .addHeader("X-API-Key", "${activeKeyForSnippets}")\n  .build()`,
+      unity:
+        inspectSnippets?.unity?.replace(/app_generated_on_connect/g, activeUidForSnippets).replace(/aegis_live_ISSUED_ON_CONNECT/g, activeKeyForSnippets) ||
+        `// Unity C# SDK\nusing var req = UnityWebRequest.Get("${apiBaseOrigin}/api/v1/sdk/config");\nreq.SetRequestHeader("X-App-Id", "${activeUidForSnippets}");\nreq.SetRequestHeader("X-API-Key", "${activeKeyForSnippets}");`,
+      ios:
+        inspectSnippets?.ios?.replace(/app_generated_on_connect/g, activeUidForSnippets).replace(/aegis_live_ISSUED_ON_CONNECT/g, activeKeyForSnippets) ||
+        `var req = URLRequest(url: URL(string: "${apiBaseOrigin}/api/v1/sdk/config")!)\nreq.setValue("${activeUidForSnippets}", forHTTPHeaderField: "X-App-Id")\nreq.setValue("${activeKeyForSnippets}", forHTTPHeaderField: "X-API-Key")`,
+    };
 
     return (
       <div className="space-y-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="font-display text-xl font-semibold text-slate-900 dark:text-slate-100">
-              Connect New App & SDK Integration
+              Universal App Onboarding Wizard
             </h1>
             <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-              Register unlimited Android apps, games, websites, iOS apps, or API services and obtain isolated App UID & Bearer credentials.
+              Inspect any Android app, Unity game, website, iOS app, or REST service, generate isolated backend schemas & endpoints, and provision a dedicated control console.
             </p>
           </div>
           <button
@@ -532,12 +620,24 @@ client.newCall(req).execute().use { resp ->
 
         {createdCredentials && (
           <section className="rounded-xl border border-emerald-300 bg-emerald-50/70 p-5 dark:border-emerald-800 dark:bg-emerald-950/30">
-            <h2 className="font-display text-sm font-semibold text-emerald-900 dark:text-emerald-200">
-              Credentials Issued for {createdCredentials.app.name}
-            </h2>
-            <p className="mt-1 text-xs text-emerald-800 dark:text-emerald-300">
-              Copy the plaintext API key now — Aegis stores only its SHA-256 hash and will not show this secret again.
-            </p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-display text-sm font-semibold text-emerald-900 dark:text-emerald-200">
+                  Backend & Credentials Provisioned for {createdCredentials.app.name}
+                </h2>
+                <p className="mt-0.5 text-xs text-emerald-800 dark:text-emerald-300">
+                  Copy the plaintext API key now — Aegis stores only its SHA-256 hash.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => onNavigate(`app-workspace:${createdCredentials.app.id}`)}
+                className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 text-xs font-medium text-white hover:bg-slate-800 dark:bg-emerald-600"
+              >
+                <Terminal className="h-3.5 w-3.5" />
+                Open Dedicated App Console
+              </button>
+            </div>
             <div className="mt-3 grid gap-3 sm:grid-cols-2 text-xs">
               <div className="rounded-lg border border-emerald-200 bg-white p-3 dark:border-emerald-900 dark:bg-slate-900">
                 <p className="text-slate-500">App UID (X-App-Id)</p>
@@ -582,7 +682,7 @@ client.newCall(req).execute().use { resp ->
             onSubmit={handleConnectApp}
             className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-6 dark:border-slate-800 dark:bg-slate-900"
           >
-            <h2 className="font-display text-sm font-semibold">Register Application</h2>
+            <h2 className="font-display text-sm font-semibold">01. Register & Inspect Application</h2>
             <div className="grid gap-3 sm:grid-cols-2 text-xs">
               <div>
                 <label htmlFor="connect-app-name" className="block font-medium">
@@ -593,7 +693,7 @@ client.newCall(req).execute().use { resp ->
                   required
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
-                  placeholder="e.g. Atlas Runner Android"
+                  placeholder="e.g. Unity Strike Arena"
                   className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
                 />
               </div>
@@ -607,11 +707,29 @@ client.newCall(req).execute().use { resp ->
                   onChange={(e) => setNewPlatform(e.target.value)}
                   className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
                 >
-                  <option value="android">Android App</option>
+                  <option value="android">Android App (Kotlin/Java)</option>
+                  <option value="unity">Unity Game (C# SDK)</option>
                   <option value="game">Mobile / Web Game</option>
                   <option value="website">Website / Web App</option>
-                  <option value="ios">iOS App</option>
-                  <option value="api">Backend / API Service</option>
+                  <option value="ios">iOS App (Swift)</option>
+                  <option value="api">REST API Service</option>
+                </select>
+              </div>
+              <div>
+                <label htmlFor="connect-app-mode" className="block font-medium">
+                  Backend Integration Mode
+                </label>
+                <select
+                  id="connect-app-mode"
+                  value={integrationMode}
+                  onChange={(e) =>
+                    setIntegrationMode(e.target.value as 'aegis_managed' | 'hybrid' | 'external_backend')
+                  }
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 text-xs dark:border-slate-700 dark:bg-slate-950"
+                >
+                  <option value="aegis_managed">Aegis-Managed Isolated Backend</option>
+                  <option value="hybrid">Hybrid (Aegis + External Sync URL)</option>
+                  <option value="external_backend">External Backend (Inspect OpenAPI/Manifest)</option>
                 </select>
               </div>
               <div>
@@ -622,19 +740,7 @@ client.newCall(req).execute().use { resp ->
                   id="connect-app-pkg"
                   value={newPkg}
                   onChange={(e) => setNewPkg(e.target.value)}
-                  placeholder="com.studio.atlas or app.example.com"
-                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
-                />
-              </div>
-              <div>
-                <label htmlFor="connect-app-admob" className="block font-medium">
-                  AdMob App ID (optional)
-                </label>
-                <input
-                  id="connect-app-admob"
-                  value={newAdmobId}
-                  onChange={(e) => setNewAdmobId(e.target.value)}
-                  placeholder="ca-app-pub-xxxxxxxxxxxxxxxx~yyyyyyyyyy"
+                  placeholder="com.studio.game or app.example.com"
                   className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
                 />
               </div>
@@ -661,21 +767,66 @@ client.newCall(req).execute().use { resp ->
                 />
               </div>
             </div>
+
+            {integrationMode !== 'aegis_managed' && (
+              <div className="grid gap-3 sm:grid-cols-2 text-xs">
+                <div>
+                  <label htmlFor="connect-backend-url" className="block font-medium">
+                    External Backend URL
+                  </label>
+                  <input
+                    id="connect-backend-url"
+                    value={backendBaseUrl}
+                    onChange={(e) => setBackendBaseUrl(e.target.value)}
+                    placeholder="https://api.example.com"
+                    className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="connect-manifest-url" className="block font-medium">
+                    OpenAPI / Manifest URL (optional)
+                  </label>
+                  <input
+                    id="connect-manifest-url"
+                    value={manifestUrl}
+                    onChange={(e) => setManifestUrl(e.target.value)}
+                    placeholder="https://api.example.com/openapi.json"
+                    className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
+              </div>
+            )}
+
             <div className="text-xs">
-              <label htmlFor="connect-app-desc" className="block font-medium">
-                Description
+              <label htmlFor="connect-models-text" className="block font-medium">
+                Data Models to Provision (optional DSL or JSON)
               </label>
               <input
-                id="connect-app-desc"
-                value={newDesc}
-                onChange={(e) => setNewDesc(e.target.value)}
-                placeholder="Production Android client connected to Aegis telemetry & remote config"
-                className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
+                id="connect-models-text"
+                value={modelsText}
+                onChange={(e) => setModelsText(e.target.value)}
+                placeholder="tournaments(title:text, prize_pool:number, active:boolean); matches(map:text, winner:text)"
+                className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
               />
             </div>
+
+            <div className="text-xs">
+              <label htmlFor="connect-openapi-json" className="block font-medium">
+                Paste OpenAPI / Swagger JSON (optional inspection)
+              </label>
+              <textarea
+                id="connect-openapi-json"
+                rows={2}
+                value={openapiText}
+                onChange={(e) => setOpenapiText(e.target.value)}
+                placeholder='{"openapi":"3.0.0","paths":{"/config":{"get":{}}}}'
+                className="mt-1 w-full rounded-lg border border-slate-200 p-2 font-mono text-[11px] dark:border-slate-700 dark:bg-slate-950"
+              />
+            </div>
+
             <div className="text-xs">
               <label htmlFor="connect-key-name" className="block font-medium">
-                Initial API Key Name & Scopes
+                Initial API Key & Scopes
               </label>
               <input
                 id="connect-key-name"
@@ -683,9 +834,9 @@ client.newCall(req).execute().use { resp ->
                 onChange={(e) => setNewKeyName(e.target.value)}
                 className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
               />
-              <div className="mt-2 flex flex-wrap gap-3">
+              <div className="mt-2 flex flex-wrap gap-2.5">
                 {KEY_SCOPE_OPTIONS.map((scope) => (
-                  <label key={scope} className="inline-flex items-center gap-1.5 font-mono">
+                  <label key={scope} className="inline-flex items-center gap-1 font-mono text-[11px]">
                     <input
                       type="checkbox"
                       checked={newScopes.includes(scope)}
@@ -700,19 +851,62 @@ client.newCall(req).execute().use { resp ->
                 ))}
               </div>
             </div>
-            <button
-              type="submit"
-              disabled={creatingApp}
-              className="inline-flex h-10 items-center gap-2 rounded-lg bg-blue-600 px-4 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-            >
-              <Plus className="h-4 w-4" />
-              {creatingApp ? 'Connecting App...' : 'Connect App & Issue API Key'}
-            </button>
+
+            <div className="flex flex-wrap gap-2 pt-1">
+              <button
+                type="button"
+                disabled={inspectingApp}
+                onClick={() => void handleInspectApp()}
+                className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 text-xs font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+              >
+                <SearchCode className="h-4 w-4" />
+                {inspectingApp ? 'Inspecting Spec...' : '02. Inspect Capabilities & Schema'}
+              </button>
+              <button
+                type="submit"
+                disabled={creatingApp}
+                className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-blue-600 px-4 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                <Plus className="h-4 w-4" />
+                {creatingApp ? 'Provisioning...' : '03. Connect App & Provision Backend'}
+              </button>
+            </div>
           </form>
 
-          {/* Live SDK Verifier & Snippets */}
+          {/* Inspection Preview, Live SDK Verifier & Platform Snippets */}
           <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-6 dark:border-slate-800 dark:bg-slate-900">
-            <h2 className="font-display text-sm font-semibold">Live SDK Endpoint Verifier & Snippets</h2>
+            {inspectReport && (
+              <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3.5 text-xs dark:border-slate-800 dark:bg-slate-950">
+                <div className="flex items-start gap-2">
+                  {inspectReport.fullControlAvailable ? (
+                    <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                  ) : (
+                    <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                  )}
+                  <div>
+                    <p className="font-semibold text-slate-900 dark:text-slate-100">
+                      Capability Audit · Namespace {inspectReport.backendNamespace}
+                    </p>
+                    <p className="mt-0.5 text-slate-600 dark:text-slate-400">
+                      {inspectReport.honestySummary}
+                    </p>
+                  </div>
+                </div>
+                {inspectReport.missingCapabilities.length > 0 && (
+                  <p className="text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                    Unverified: {inspectReport.missingCapabilities.join(' · ')}
+                  </p>
+                )}
+                <div className="text-[11px] text-slate-600 dark:text-slate-400">
+                  Proposed Isolated Collections ({inspectReport.proposedCollections.length}):{' '}
+                  <span className="font-mono font-medium text-slate-900 dark:text-slate-200">
+                    {inspectReport.proposedCollections.map((c) => `${c.slug} (${c.fields.length} cols)`).join(', ')}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            <h2 className="font-display text-sm font-semibold">04. Live SDK Endpoint Verifier & Integration Code</h2>
             <div className="grid gap-2 sm:grid-cols-2 text-xs">
               <div>
                 <label htmlFor="sdk-test-uid" className="block font-medium">
@@ -750,57 +944,42 @@ client.newCall(req).execute().use { resp ->
             </button>
 
             {sdkTestOutput && (
-              <pre className="max-h-44 overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3 font-mono text-[11px] dark:border-slate-800 dark:bg-slate-950">
+              <pre className="max-h-40 overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3 font-mono text-[11px] dark:border-slate-800 dark:bg-slate-950">
                 {sdkTestOutput}
               </pre>
             )}
 
-            <div className="space-y-3 text-xs">
-              <div>
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="font-medium text-slate-700 dark:text-slate-300">Website / JS Fetch SDK</span>
-                  <button
-                    type="button"
-                    onClick={() => void copyText('snip-web', webSnippet, 'Web SDK snippet')}
-                    className="text-blue-600 hover:underline dark:text-blue-400"
-                  >
-                    Copy
-                  </button>
+            <div className="space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-950">
+                  {(['website', 'android', 'unity', 'ios', 'curl'] as const).map((lang) => (
+                    <button
+                      key={lang}
+                      type="button"
+                      onClick={() => setActiveSnippetTab(lang)}
+                      className={`rounded-md px-2.5 py-1 text-[11px] font-medium capitalize ${
+                        activeSnippetTab === lang
+                          ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-slate-100'
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      {lang}
+                    </button>
+                  ))}
                 </div>
-                <pre className="overflow-x-auto rounded-lg bg-slate-50 p-2.5 font-mono text-[11px] dark:bg-slate-950">
-                  {webSnippet}
-                </pre>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void copyText(`snip-${activeSnippetTab}`, generatedSnippets[activeSnippetTab], `${activeSnippetTab} SDK snippet`)
+                  }
+                  className="text-blue-600 hover:underline dark:text-blue-400"
+                >
+                  Copy Code
+                </button>
               </div>
-              <div>
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="font-medium text-slate-700 dark:text-slate-300">Android (Kotlin / OkHttp)</span>
-                  <button
-                    type="button"
-                    onClick={() => void copyText('snip-kt', kotlinSnippet, 'Kotlin snippet')}
-                    className="text-blue-600 hover:underline dark:text-blue-400"
-                  >
-                    Copy
-                  </button>
-                </div>
-                <pre className="overflow-x-auto rounded-lg bg-slate-50 p-2.5 font-mono text-[11px] dark:bg-slate-950">
-                  {kotlinSnippet}
-                </pre>
-              </div>
-              <div>
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="font-medium text-slate-700 dark:text-slate-300">cURL Verification</span>
-                  <button
-                    type="button"
-                    onClick={() => void copyText('snip-curl', curlSnippet, 'cURL command')}
-                    className="text-blue-600 hover:underline dark:text-blue-400"
-                  >
-                    Copy
-                  </button>
-                </div>
-                <pre className="overflow-x-auto rounded-lg bg-slate-50 p-2.5 font-mono text-[11px] dark:bg-slate-950">
-                  {curlSnippet}
-                </pre>
-              </div>
+              <pre className="max-h-60 overflow-auto rounded-lg bg-slate-50 p-3 font-mono text-[11px] dark:bg-slate-950">
+                {generatedSnippets[activeSnippetTab]}
+              </pre>
             </div>
           </section>
         </div>
@@ -1963,7 +2142,7 @@ client.newCall(req).execute().use { resp ->
           className="h-9 min-w-[220px] flex-1 rounded-lg border border-slate-200 bg-white px-3 text-xs dark:border-slate-700 dark:bg-slate-900"
         />
         <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-900">
-          {(['all', 'android', 'game', 'website', 'ios', 'api'] as const).map((plat) => (
+          {(['all', 'android', 'unity', 'game', 'website', 'ios', 'api'] as const).map((plat) => (
             <button
               key={plat}
               type="button"
@@ -1990,7 +2169,7 @@ client.newCall(req).execute().use { resp ->
             No Connected Applications Yet
           </p>
           <p className="mt-1 text-xs text-slate-500">
-            Connect your first Android app, game, or website to manage isolated users, feature flags, AdMob units, and SDK keys.
+            Connect your first Android app, Unity game, or website to manage isolated users, custom collections, feature flags, AdMob units, and SDK keys.
           </p>
           {hasPerm('apps.manage') && (
             <button
@@ -2016,6 +2195,7 @@ client.newCall(req).execute().use { resp ->
                     </span>
                     <span className="text-slate-500 capitalize">
                       {app.platform} · v{app.currentVersion} · {app.status}
+                      {app.syncStatus ? ` · sync:${app.syncStatus}` : ''}
                     </span>
                     {isScoped && (
                       <span className="font-medium text-blue-600 dark:text-blue-400">
@@ -2024,13 +2204,21 @@ client.newCall(req).execute().use { resp ->
                     )}
                   </div>
                   <p className="mt-1 font-mono text-[11px] text-slate-500">
-                    {app.appUid} {app.packageOrDomain ? `· ${app.packageOrDomain}` : ''} ·{' '}
+                    {app.appUid} {app.backendNamespace ? `· ${app.backendNamespace}` : ''} {app.packageOrDomain ? `· ${app.packageOrDomain}` : ''} ·{' '}
                     {app.stats.totalUsers} users ({app.stats.bannedUsers} banned) · {app.stats.activeKeysCount} active keys ·{' '}
                     Ads ${(app.stats.adRevenueCents / 100).toFixed(2)} · {app.stats.errors24h} errors
                   </p>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => onNavigate(`app-workspace:${app.id}`)}
+                    className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2.5 py-1.5 font-medium text-white hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500"
+                  >
+                    <Terminal className="h-3.5 w-3.5" />
+                    Open App Console
+                  </button>
                   <button
                     type="button"
                     onClick={() => {

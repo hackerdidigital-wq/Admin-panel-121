@@ -374,10 +374,13 @@ export const DatabaseManagementPage: React.FC<{ subview: string }> = ({ subview 
 
 export const FilesManagementPage: React.FC<{ subview: string }> = ({ subview }) => {
   const { hasPerm } = useAuth();
+  const { selectedApp, appQueryParam } = useAppScope();
   const { pushToast } = useToast();
   const [files, setFiles] = useState<
     Array<{
       id: number;
+      appId?: number | null;
+      storageNamespace?: string;
       originalName: string;
       mimeType: string;
       sizeBytes: number;
@@ -397,6 +400,7 @@ export const FilesManagementPage: React.FC<{ subview: string }> = ({ subview }) 
       if (subview === 'files-images') qs.set('category', 'image');
       if (subview === 'files-documents') qs.set('category', 'document');
       if (subview === 'files-unused') qs.set('unused', 'true');
+      if (appQueryParam) qs.set('appId', appQueryParam);
       const res = await apiRequest<{ data: typeof files; totalBytes: number }>(`/files?${qs.toString()}`);
       setFiles(res.data);
       setTotalBytes(res.totalBytes);
@@ -407,7 +411,7 @@ export const FilesManagementPage: React.FC<{ subview: string }> = ({ subview }) 
         description: err instanceof Error ? err.message : undefined,
       });
     }
-  }, [subview, pushToast]);
+  }, [subview, appQueryParam, pushToast]);
 
   useEffect(() => {
     void loadFiles();
@@ -422,6 +426,7 @@ export const FilesManagementPage: React.FC<{ subview: string }> = ({ subview }) 
         await apiRequest('/files/upload', {
           method: 'POST',
           body: JSON.stringify({
+            appId: selectedApp ? selectedApp.id : null,
             filename: file.name,
             mimeType: file.type || 'application/octet-stream',
             base64Data: reader.result,
@@ -466,13 +471,14 @@ export const FilesManagementPage: React.FC<{ subview: string }> = ({ subview }) 
         <div>
           <h1 className="font-display text-xl font-semibold">File & Media Management</h1>
           <p className="mt-0.5 text-xs text-slate-500">
+            {selectedApp ? `Namespace: ${selectedApp.backendNamespace || selectedApp.slug} · ` : 'Global + All Apps · '}
             Total Storage Used: {(totalBytes / 1024).toFixed(1)} KB across {files.length} verified asset(s).
           </p>
         </div>
         {hasPerm('files.write') && (
           <label className="inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg bg-blue-600 px-4 text-xs font-medium text-white hover:bg-blue-700">
             <Upload className="h-3.5 w-3.5" />
-            <span>Upload File (Max 750 KB)</span>
+            <span>{selectedApp ? `Upload to ${selectedApp.name}` : 'Upload File (Max 750 KB)'}</span>
             <input type="file" onChange={handleFileUpload} className="hidden" />
           </label>
         )}
@@ -487,7 +493,7 @@ export const FilesManagementPage: React.FC<{ subview: string }> = ({ subview }) 
               <div>
                 <p className="font-medium text-slate-900 dark:text-slate-100">{f.originalName}</p>
                 <p className="font-mono text-[11px] text-slate-500">
-                  {f.mimeType} · {(f.sizeBytes / 1024).toFixed(1)} KB · SHA256:{' '}
+                  {f.storageNamespace || 'global'} · {f.mimeType} · {(f.sizeBytes / 1024).toFixed(1)} KB · SHA256:{' '}
                   {f.checksumSha256.slice(0, 12)}...
                 </p>
               </div>

@@ -51,7 +51,7 @@ async function apiCall(
   return handleApiRequest(req, env);
 }
 
-test('D1 SQLite migrations initialize all 33 relational tables, foreign keys, and indexes', async () => {
+test('D1 SQLite migrations initialize all 36 relational tables, foreign keys, and indexes', async () => {
   const { d1, raw } = createLocalD1Database(':memory:');
   try {
     const tables = await d1
@@ -59,14 +59,14 @@ test('D1 SQLite migrations initialize all 33 relational tables, foreign keys, an
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
       )
       .all<{ name: string }>();
-    assert.equal(tables.results.length, 33);
+    assert.equal(tables.results.length, 36);
 
     const indexes = await d1
       .prepare(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'"
       )
       .all<{ name: string }>();
-    assert.ok(indexes.results.length >= 20);
+    assert.ok(indexes.results.length >= 24);
 
     const fkCheck = raw.prepare('PRAGMA foreign_key_check').all();
     assert.equal(fkCheck.length, 0);
@@ -791,6 +791,255 @@ test('Webhooks HMAC Setup, Scheduled Auto-Backup Job, Snapshot Restore, and App-
     assert.equal(permRes.status, 200);
     const permBody = (await permRes.json()) as { grant: { roleScope: string } };
     assert.equal(permBody.grant.roleScope, 'owner');
+  } finally {
+    close();
+  }
+});
+
+test('Universal Master Control: App Inspection, Isolated Collections/Flags/Storage, Dynamic Backend Gen, Scoped SDK Errors, & Per-App RBAC', async () => {
+  const { env, close } = createTestEnv();
+  try {
+    const setupRes = await apiCall(env, 'POST', '/api/auth/setup', {
+      body: { password: 'SuperPassword#2026' },
+    });
+    assert.equal(setupRes.status, 201);
+    const superCookie = extractCookieValue(setupRes);
+
+    // 1. SDK CORS preflight supports PATCH, DELETE & X-API-Key
+    const sdkPreflight = await apiCall(env, 'OPTIONS', '/api/v1/sdk/data/leaderboard', {
+      headers: {
+        origin: 'https://game-client.example.com',
+        'access-control-request-method': 'PATCH',
+      },
+    });
+    assert.equal(sdkPreflight.status, 204);
+    assert.equal(sdkPreflight.headers.get('access-control-allow-origin'), '*');
+    assert.ok((sdkPreflight.headers.get('access-control-allow-methods') || '').includes('PATCH'));
+    assert.ok((sdkPreflight.headers.get('access-control-allow-methods') || '').includes('DELETE'));
+
+    // 2. Inspect read-only external OpenAPI spec -> honestly refuses to claim full control
+    const inspectReadOnly = await apiCall(env, 'POST', '/api/apps/inspect', {
+      cookie: superCookie,
+      body: {
+        name: 'External Catalog',
+        platform: 'api',
+        integrationMode: 'external_backend',
+        backendBaseUrl: 'https://catalog.example.com',
+        openapiSpec: JSON.stringify({
+          openapi: '3.0.0',
+          paths: { '/products': { get: { summary: 'List products' } } },
+        }),
+      },
+    });
+    assert.equal(inspectReadOnly.status, 200);
+    const inspectBody = (await inspectReadOnly.json()) as {
+      report: { fullControlAvailable: boolean; controlLevel: string; missingCapabilities: string[] };
+    };
+    assert.equal(inspectBody.report.fullControlAvailable, false);
+    assert.equal(inspectBody.report.controlLevel, 'read_only');
+
+    // 3. Connect two separate apps: Unity Game & Website with auto-provisioned collections
+    const unityRes = await apiCall(env, 'POST', '/api/apps', {
+      cookie: superCookie,
+      body: {
+        name: 'Unity Strike',
+        platform: 'unity',
+        packageOrDomain: 'com.studio.unitystrike',
+        integrationMode: 'aegis_managed',
+      },
+    });
+    assert.equal(unityRes.status, 201);
+    const unityBody = (await unityRes.json()) as {
+      app: { id: number; appUid: string; backendNamespace: string };
+      initialApiKey: string;
+    };
+    assert.ok(unityBody.app.backendNamespace.startsWith('ns_unity_strike_'));
+
+    const webRes = await apiCall(env, 'POST', '/api/apps', {
+      cookie: superCookie,
+      body: {
+        name: 'Nova Store Web',
+        platform: 'website',
+        packageOrDomain: 'https://novastore.example',
+      },
+    });
+    assert.equal(webRes.status, 201);
+    const webBody = (await webRes.json()) as {
+      app: { id: number; appUid: string };
+      initialApiKey: string;
+    };
+
+    // 4. Dynamic Backend Module Generator creates new isolated collection & D1 DDL
+    const genRes = await apiCall(env, 'POST', `/api/apps/${unityBody.app.id}/modules/generate`, {
+      cookie: superCookie,
+      body: {
+        name: 'Tournaments',
+        category: 'game_economy',
+        fields: [
+          { name: 'title', label: 'Title', type: 'text', required: true },
+          { name: 'prize_pool', label: 'Prize Pool', type: 'number', required: true },
+        ],
+      },
+    });
+    assert.equal(genRes.status, 201);
+    const genBody = (await genRes.json()) as { collection: { slug: string }; migrationSql: string };
+    assert.equal(genBody.collection.slug, 'tournaments');
+    assert.ok(genBody.migrationSql.includes('CREATE TABLE IF NOT EXISTS'));
+
+    // 5. Same feature flag key across App 1 and App 2 stays completely isolated
+    const flag1 = await apiCall(env, 'POST', '/api/app/flags', {
+      cookie: superCookie,
+      body: { appId: unityBody.app.id, key: 'double_xp', name: 'Double XP', isEnabled: true },
+    });
+    assert.equal(flag1.status, 201);
+    const flag2 = await apiCall(env, 'POST', '/api/app/flags', {
+      cookie: superCookie,
+      body: { appId: webBody.app.id, key: 'double_xp', name: 'Web Promo', isEnabled: false },
+    });
+    assert.equal(flag2.status, 201);
+
+    const unitySdkCfg = await apiCall(env, 'GET', '/api/v1/sdk/config', {
+      headers: { 'x-app-id': unityBody.app.appUid, 'x-api-key': unityBody.initialApiKey },
+    });
+    assert.equal(unitySdkCfg.status, 200);
+    const unityCfgJson = (await unitySdkCfg.json()) as {
+      featureFlags: Record<string, { enabled: boolean; rolloutPercentage: number; scoped: boolean }>;
+    };
+    assert.equal(unityCfgJson.featureFlags.double_xp?.enabled, true);
+
+    const webSdkCfg = await apiCall(env, 'GET', '/api/v1/sdk/config', {
+      headers: { 'x-app-id': webBody.app.appUid, 'x-api-key': webBody.initialApiKey },
+    });
+    assert.equal(webSdkCfg.status, 200);
+    const webCfgJson = (await webSdkCfg.json()) as {
+      featureFlags: Record<string, { enabled: boolean; rolloutPercentage: number; scoped: boolean }>;
+    };
+    assert.equal(webCfgJson.featureFlags.double_xp?.enabled, false);
+
+    // 6. SDK collection CRUD + CSV export + strict 404/403 scope isolation
+    const writeScore = await apiCall(env, 'POST', '/api/v1/sdk/data/leaderboard', {
+      headers: { 'x-app-id': unityBody.app.appUid, 'x-api-key': unityBody.initialApiKey },
+      body: { data: { player_id: 'p1', player_name: 'Aria', score: 9400 } },
+    });
+    assert.equal(writeScore.status, 201);
+
+    const readUnityScores = await apiCall(env, 'GET', '/api/v1/sdk/data/leaderboard', {
+      headers: { 'x-app-id': unityBody.app.appUid, 'x-api-key': unityBody.initialApiKey },
+    });
+    assert.equal(readUnityScores.status, 200);
+    const scoreJson = (await readUnityScores.json()) as { records: Array<{ data: { player_name: string } }> };
+    assert.equal(scoreJson.records.length, 1);
+    assert.equal(scoreJson.records[0].data.player_name, 'Aria');
+
+    // CSV export works cleanly with proper column headers
+    const csvRes = await apiCall(env, 'GET', `/api/apps/${unityBody.app.id}/collections/leaderboard/records?format=csv`, {
+      cookie: superCookie,
+    });
+    assert.equal(csvRes.status, 200);
+    const csvText = await csvRes.text();
+    assert.ok(csvText.includes('player_name'));
+    assert.ok(csvText.includes('Aria'));
+
+    // Website app MUST NOT see Unity's leaderboard collection (404 COLLECTION_NOT_FOUND)
+    const crossCol = await apiCall(env, 'GET', '/api/v1/sdk/data/leaderboard', {
+      headers: { 'x-app-id': webBody.app.appUid, 'x-api-key': webBody.initialApiKey },
+    });
+    assert.equal(crossCol.status, 404);
+
+    // Narrowly scoped key returns structured 403 MISSING_SCOPE instead of generic failure
+    const limitedKeyRes = await apiCall(env, 'POST', `/api/apps/${unityBody.app.id}/keys`, {
+      cookie: superCookie,
+      body: { name: 'Read Only Key', scopes: ['config:read'] },
+    });
+    assert.equal(limitedKeyRes.status, 201);
+    const limitedKeyBody = (await limitedKeyRes.json()) as { apiKey: string };
+
+    const forbiddenWrite = await apiCall(env, 'POST', '/api/v1/sdk/data/leaderboard', {
+      headers: { 'x-app-id': unityBody.app.appUid, 'x-api-key': limitedKeyBody.apiKey },
+      body: { data: { player_name: 'Blocked' } },
+    });
+    assert.equal(forbiddenWrite.status, 403);
+    const forbiddenJson = (await forbiddenWrite.json()) as { code: string; requiredScope: string };
+    assert.equal(forbiddenJson.code, 'MISSING_SCOPE');
+    assert.equal(forbiddenJson.requiredScope, 'data:write');
+
+    // 7. Isolated File Storage via SDK (Unity file invisible to Website admin view)
+    const uploadRes = await apiCall(env, 'POST', '/api/v1/sdk/storage/files', {
+      headers: { 'x-app-id': unityBody.app.appUid, 'x-api-key': unityBody.initialApiKey },
+      body: {
+        filename: 'patch-notes.json',
+        mimeType: 'application/json',
+        base64Data: btoa('{"patch":"1.2.0"}'),
+      },
+    });
+    assert.equal(uploadRes.status, 201);
+
+    const webFiles = await apiCall(env, 'GET', `/api/files?appId=${webBody.app.id}`, { cookie: superCookie });
+    const webFilesJson = (await webFiles.json()) as { data: unknown[] };
+    assert.equal(webFilesJson.data.length, 0);
+
+    // 8. Per-App RBAC: Secondary admin granted access ONLY to Unity gets 200 on Unity and 403 on Website
+    const rolesRes = await apiCall(env, 'GET', '/api/roles', { cookie: superCookie });
+    const rolesJson = (await rolesRes.json()) as { roles: Array<{ id: number; slug: string }> };
+    const opsRole = rolesJson.roles.find((r) => r.slug !== 'super_admin')!;
+
+    const secUserRes = await apiCall(env, 'POST', '/api/users', {
+      cookie: superCookie,
+      body: {
+        email: 'unity-lead@aegis.local',
+        displayName: 'Unity Producer',
+        password: 'UnityLead#Password2026',
+        roleId: opsRole.id,
+      },
+    });
+    assert.equal(secUserRes.status, 201);
+    const secUserBody = (await secUserRes.json()) as { user: { id: number } };
+
+    await apiCall(env, 'PUT', `/api/apps/${unityBody.app.id}/permissions`, {
+      cookie: superCookie,
+      body: { userId: secUserBody.user.id, roleScope: 'admin', permissions: ['apps.read', 'apps.manage'] },
+    });
+
+    const secLogin = await apiCall(env, 'POST', '/api/auth/login', {
+      body: { email: 'unity-lead@aegis.local', password: 'UnityLead#Password2026' },
+    });
+    assert.equal(secLogin.status, 200);
+    const secCookie = extractCookieValue(secLogin);
+
+    const allowedWorkspace = await apiCall(env, 'GET', `/api/apps/${unityBody.app.id}/workspace`, {
+      cookie: secCookie,
+    });
+    assert.equal(allowedWorkspace.status, 200);
+
+    const deniedWorkspace = await apiCall(env, 'GET', `/api/apps/${webBody.app.id}/workspace`, {
+      cookie: secCookie,
+    });
+    assert.equal(deniedWorkspace.status, 403);
+
+    // 9. Per-App Backup & Restore preserves custom collections & records
+    const appBackupRes = await apiCall(env, 'POST', '/api/database/backups', {
+      cookie: superCookie,
+      body: { appId: unityBody.app.id },
+    });
+    assert.equal(appBackupRes.status, 201);
+    const appBackupJson = (await appBackupRes.json()) as { backup: { id: number } };
+
+    // Insert temporary extra record, then restore snapshot -> original 1 record restored
+    await apiCall(env, 'POST', `/api/apps/${unityBody.app.id}/collections/leaderboard/records`, {
+      cookie: superCookie,
+      body: { data: { player_id: 'p_temp', player_name: 'Temp', score: 1 } },
+    });
+    const appRestore = await apiCall(env, 'POST', `/api/database/backups/${appBackupJson.backup.id}/restore`, {
+      cookie: superCookie,
+      body: { mode: 'replace' },
+    });
+    assert.equal(appRestore.status, 200);
+
+    const afterRestoreScores = await apiCall(env, 'GET', `/api/apps/${unityBody.app.id}/collections/leaderboard/records`, {
+      cookie: superCookie,
+    });
+    const afterRestoreJson = (await afterRestoreScores.json()) as { data: unknown[] };
+    assert.equal(afterRestoreJson.data.length, 1);
   } finally {
     close();
   }

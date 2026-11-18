@@ -304,6 +304,9 @@ export const SIDEBAR_MODULES: SidebarModule[] = [
 ];
 
 export function resolveBreadcrumb(viewId: string): { moduleLabel: string; pageLabel: string } {
+  if (viewId.startsWith('app-workspace:')) {
+    return { moduleLabel: 'Multi-App Center', pageLabel: `App Control Center #${viewId.split(':')[1]}` };
+  }
   if (viewId.startsWith('user-detail:')) {
     return { moduleLabel: 'User Management', pageLabel: `User Profile #${viewId.split(':')[1]}` };
   }

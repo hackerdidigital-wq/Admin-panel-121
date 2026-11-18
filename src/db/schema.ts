@@ -176,7 +176,7 @@ export const connectedApps = sqliteTable(
     appUid: text('app_uid').notNull().unique(),
     slug: text('slug').notNull().unique(),
     name: text('name').notNull(),
-    platform: text('platform').default('android').notNull(), // android | game | website | ios | api
+    platform: text('platform').default('android').notNull(), // android | unity | game | website | ios | api
     packageOrDomain: text('package_or_domain').default('').notNull(),
     description: text('description').default('').notNull(),
     status: text('status').default('connected').notNull(), // connected | disconnected | maintenance
@@ -193,6 +193,19 @@ export const connectedApps = sqliteTable(
     lastHeartbeatAt: integer('last_heartbeat_at', { mode: 'timestamp_ms' }),
     lastLatencyMs: integer('last_latency_ms').default(0).notNull(),
     errorCount24h: integer('error_count_24h').default(0).notNull(),
+    backendNamespace: text('backend_namespace').default('').notNull(),
+    integrationMode: text('integration_mode').default('aegis_managed').notNull(), // aegis_managed | external_backend | hybrid
+    backendBaseUrl: text('backend_base_url').default('').notNull(),
+    manifestUrl: text('manifest_url').default('').notNull(),
+    discoveredCapabilities: text('discovered_capabilities', { mode: 'json' })
+      .$type<Record<string, unknown>>()
+      .default(sql`'{}'`)
+      .notNull(),
+    enabledModules: text('enabled_modules', { mode: 'json' })
+      .$type<string[]>()
+      .default(sql`'[]'`)
+      .notNull(),
+    syncStatus: text('sync_status').default('unverified').notNull(), // unverified | verified | partial | sync_failed
     settingsJson: text('settings_json', { mode: 'json' })
       .$type<Record<string, unknown>>()
       .default(sql`'{}'`)
@@ -350,6 +363,96 @@ export const userAppPermissions = sqliteTable(
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
   },
   (table) => [uniqueIndex('user_app_perm_unique_idx').on(table.userId, table.appId)]
+);
+
+// 2c. Per-App Dynamic Modules, Isolated Collections & Records
+export const appModules = sqliteTable(
+  'app_modules',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id')
+      .references(() => connectedApps.id, { onDelete: 'cascade' })
+      .notNull(),
+    moduleKey: text('module_key').notNull(),
+    name: text('name').notNull(),
+    category: text('category').default('custom').notNull(),
+    status: text('status').default('active').notNull(),
+    configJson: text('config_json', { mode: 'json' })
+      .$type<Record<string, unknown>>()
+      .default(sql`'{}'`)
+      .notNull(),
+    generatedCode: text('generated_code').default('').notNull(),
+    migrationSql: text('migration_sql').default('').notNull(),
+    apiEndpoints: text('api_endpoints', { mode: 'json' })
+      .$type<Array<Record<string, unknown>>>()
+      .default(sql`'[]'`)
+      .notNull(),
+    uiSchema: text('ui_schema', { mode: 'json' })
+      .$type<Record<string, unknown>>()
+      .default(sql`'{}'`)
+      .notNull(),
+    createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [
+    uniqueIndex('app_modules_app_key_unique_idx').on(table.appId, table.moduleKey),
+    index('app_modules_app_idx').on(table.appId),
+  ]
+);
+
+export const appCollections = sqliteTable(
+  'app_collections',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id')
+      .references(() => connectedApps.id, { onDelete: 'cascade' })
+      .notNull(),
+    slug: text('slug').notNull(),
+    name: text('name').notNull(),
+    description: text('description').default('').notNull(),
+    fieldsJson: text('fields_json', { mode: 'json' })
+      .$type<Array<{ name: string; label: string; type: string; required?: boolean }>>()
+      .default(sql`'[]'`)
+      .notNull(),
+    permissionsJson: text('permissions_json', { mode: 'json' })
+      .$type<Record<string, unknown>>()
+      .default(sql`'{"read":"sdk","write":"sdk"}'`)
+      .notNull(),
+    migrationSql: text('migration_sql').default('').notNull(),
+    createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [
+    uniqueIndex('app_collections_app_slug_unique_idx').on(table.appId, table.slug),
+    index('app_collections_app_idx').on(table.appId),
+  ]
+);
+
+export const appRecords = sqliteTable(
+  'app_records',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id')
+      .references(() => connectedApps.id, { onDelete: 'cascade' })
+      .notNull(),
+    collectionId: integer('collection_id')
+      .references(() => appCollections.id, { onDelete: 'cascade' })
+      .notNull(),
+    recordUid: text('record_uid').notNull(),
+    dataJson: text('data_json', { mode: 'json' })
+      .$type<Record<string, unknown>>()
+      .default(sql`'{}'`)
+      .notNull(),
+    createdByUserId: integer('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [
+    uniqueIndex('app_records_col_uid_unique_idx').on(table.collectionId, table.recordUid),
+    index('app_records_app_col_idx').on(table.appId, table.collectionId),
+  ]
 );
 
 // 3. Content Management
@@ -596,6 +699,8 @@ export const files = sqliteTable(
   'files',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id').references(() => connectedApps.id, { onDelete: 'cascade' }),
+    storageNamespace: text('storage_namespace').default('global').notNull(),
     filename: text('filename').notNull(),
     originalName: text('original_name').notNull(),
     mimeType: text('mime_type').notNull(),
@@ -610,7 +715,10 @@ export const files = sqliteTable(
     deletedAt: integer('deleted_at', { mode: 'timestamp_ms' }),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
   },
-  (table) => [index('files_category_idx').on(table.category)]
+  (table) => [
+    index('files_category_idx').on(table.category),
+    index('files_app_idx').on(table.appId),
+  ]
 );
 
 // 10. Audit, API Logs, Background Jobs & Backups

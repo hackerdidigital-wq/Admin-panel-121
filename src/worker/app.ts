@@ -13,6 +13,7 @@ import {
   withSecurityHeaders,
 } from './http.ts';
 import { WorkerRouter } from './router.ts';
+import { registerAppMasterControlRoutes } from './routes/appMasterControl.ts';
 import { registerAuthAndDashboardRoutes } from './routes/authAndDashboard.ts';
 import { registerCommerceAndAppRoutes } from './routes/commerceAndApp.ts';
 import { registerContentAndCommsRoutes } from './routes/contentAndComms.ts';
@@ -30,6 +31,7 @@ function createRouter(): WorkerRouter {
   const router = new WorkerRouter();
   registerAuthAndDashboardRoutes(router);
   registerMultiAppAndSdkRoutes(router);
+  registerAppMasterControlRoutes(router);
   registerUsersAndRolesRoutes(router);
   registerContentAndCommsRoutes(router);
   registerCommerceAndAppRoutes(router);

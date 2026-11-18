@@ -1,9 +1,10 @@
-import { desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import type { AegisDatabase } from '../../db/index.ts';
 import {
   apiLogs,
   auditLogs,
   backups,
+  connectedApps,
   files,
   roles,
   systemSettings,
@@ -12,7 +13,7 @@ import {
 import { computeSha256, sanitizeText } from '../../lib/security.ts';
 import { isValidRepoName } from '../../lib/validation.ts';
 import { writeAuditLog } from '../audit.ts';
-import { requirePermission } from '../auth.ts';
+import { requireAppAccess, requirePermission } from '../auth.ts';
 import { errorResponse, jsonResponse, readJsonBody } from '../http.ts';
 import type { WorkerRouter } from '../router.ts';
 import type { D1Database, WorkerContext } from '../types.ts';
@@ -32,6 +33,9 @@ const ALLOWED_TABLES = new Set([
   'webhooks',
   'webhook_deliveries',
   'user_app_permissions',
+  'app_modules',
+  'app_collections',
+  'app_records',
   'categories',
   'content_items',
   'content_versions',
@@ -56,6 +60,9 @@ const ALLOWED_TABLES = new Set([
 const BACKUP_TABLES = [
   'roles',
   'connected_apps',
+  'app_modules',
+  'app_collections',
+  'app_records',
   'app_users',
   'app_events',
   'webhooks',
@@ -73,6 +80,9 @@ const BACKUP_TABLES = [
 ] as const;
 
 const APP_SCOPED_BACKUP_TABLES = new Set([
+  'app_modules',
+  'app_collections',
+  'app_records',
   'app_users',
   'app_events',
   'webhooks',
@@ -87,6 +97,9 @@ const APP_SCOPED_BACKUP_TABLES = new Set([
 ]);
 
 const RESTORE_DELETE_ORDER = [
+  'app_records',
+  'app_collections',
+  'app_modules',
   'app_events',
   'app_users',
   'ad_configs',
@@ -102,6 +115,9 @@ const RESTORE_DELETE_ORDER = [
 const RESTORE_INSERT_ORDER = [
   'roles',
   'connected_apps',
+  'app_modules',
+  'app_collections',
+  'app_records',
   'webhooks',
   'user_app_permissions',
   'app_users',
@@ -636,17 +652,32 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
     });
   });
 
-  // ---- MODULE O: FILE & MEDIA MANAGEMENT (D1 Free-Tier Storage, Max 750KB) ----
+  // ---- MODULE O: FILE & MEDIA MANAGEMENT (D1 Free-Tier Storage, Per-App Isolated, Max 750KB) ----
   router.get('/api/files', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'files.read');
+    const appIdParam = ctx.url.searchParams.get('appId');
+    const scopedAppId =
+      appIdParam && appIdParam !== 'all' && Number.isFinite(Number(appIdParam)) && Number(appIdParam) > 0
+        ? Math.floor(Number(appIdParam))
+        : null;
+
+    const permFail = scopedAppId
+      ? await requireAppAccess(ctx, scopedAppId, 'files.read')
+      : await requirePermission(ctx, 'files.read');
     if (permFail) return permFail;
 
     const category = sanitizeText(ctx.url.searchParams.get('category') || 'all', 30);
     const unusedOnly = ctx.url.searchParams.get('unused') === 'true';
 
+    const conditions: SQL[] = [sql`${files.deletedAt} IS NULL`];
+    if (scopedAppId !== null) {
+      conditions.push(eq(files.appId, scopedAppId));
+    }
+
     const rows = await ctx.db
       .select({
         id: files.id,
+        appId: files.appId,
+        storageNamespace: files.storageNamespace,
         filename: files.filename,
         originalName: files.originalName,
         mimeType: files.mimeType,
@@ -658,7 +689,7 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
         createdAt: files.createdAt,
       })
       .from(files)
-      .where(sql`${files.deletedAt} IS NULL`)
+      .where(and(...conditions))
       .orderBy(desc(files.createdAt));
 
     const filtered = rows.filter((r) => {
@@ -672,15 +703,34 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
   });
 
   router.post('/api/files/upload', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'files.write');
-    if (permFail) return permFail;
-
     const body = await readJsonBody<{
+      appId?: number | null;
       filename?: string;
       mimeType?: string;
       base64Data?: string;
       isPublic?: boolean;
     }>(ctx.request);
+
+    const appId =
+      body.appId !== undefined && body.appId !== null && Number.isFinite(Number(body.appId)) && Number(body.appId) > 0
+        ? Math.floor(Number(body.appId))
+        : null;
+
+    const permFail = appId
+      ? await requireAppAccess(ctx, appId, 'files.write')
+      : await requirePermission(ctx, 'files.write');
+    if (permFail) return permFail;
+
+    let storageNamespace = 'global';
+    if (appId !== null) {
+      const appRows = await ctx.db
+        .select({ id: connectedApps.id, backendNamespace: connectedApps.backendNamespace, slug: connectedApps.slug })
+        .from(connectedApps)
+        .where(eq(connectedApps.id, appId))
+        .limit(1);
+      if (!appRows[0]) return errorResponse(404, 'Target connected app not found.');
+      storageNamespace = appRows[0].backendNamespace || `app_${appRows[0].slug}`;
+    }
 
     const originalName = sanitizeText(body.filename, 140).replace(/[^A-Za-z0-9._-]/g, '_');
     const mimeType = sanitizeText(body.mimeType, 80);
@@ -715,12 +765,14 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
     const created = await ctx.db
       .insert(files)
       .values({
+        appId,
+        storageNamespace,
         filename: storedName,
         originalName,
         mimeType,
         sizeBytes: bytes.byteLength,
         category,
-        storagePath: `d1://files/${storedName}`,
+        storagePath: `d1://${storageNamespace}/${storedName}`,
         contentBase64: rawBase64,
         checksumSha256,
         isPublic: Boolean(body.isPublic),
@@ -728,6 +780,8 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
       })
       .returning({
         id: files.id,
+        appId: files.appId,
+        storageNamespace: files.storageNamespace,
         filename: files.filename,
         originalName: files.originalName,
         mimeType: files.mimeType,
@@ -744,7 +798,7 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
       module: 'files',
       targetType: 'file',
       targetId: created[0].id,
-      details: { originalName, sizeBytes: bytes.byteLength, mimeType },
+      details: { appId, storageNamespace, originalName, sizeBytes: bytes.byteLength, mimeType },
       ipAddress: ctx.clientIp,
       userAgent: ctx.userAgent,
     });
@@ -753,15 +807,17 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
   });
 
   router.get('/api/files/:id/download', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'files.read');
-    if (permFail) return permFail;
-
     const id = Number(ctx.params.id);
     const rows = await ctx.db.select().from(files).where(eq(files.id, id)).limit(1);
     const row = rows[0];
     if (!row || row.deletedAt || !row.contentBase64) {
       return errorResponse(404, 'File not found.');
     }
+
+    const permFail = row.appId
+      ? await requireAppAccess(ctx, row.appId, 'files.read')
+      : await requirePermission(ctx, 'files.read');
+    if (permFail) return permFail;
 
     const bytes = decodeBase64Bytes(row.contentBase64);
     const bodyBuf = new Uint8Array(bytes.byteLength);
@@ -776,13 +832,15 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
   });
 
   router.delete('/api/files/:id', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'files.delete');
-    if (permFail) return permFail;
-
     const id = Number(ctx.params.id);
     const rows = await ctx.db.select().from(files).where(eq(files.id, id)).limit(1);
     const target = rows[0];
     if (!target) return errorResponse(404, 'File not found.');
+
+    const permFail = target.appId
+      ? await requireAppAccess(ctx, target.appId, 'files.delete')
+      : await requirePermission(ctx, 'files.delete');
+    if (permFail) return permFail;
 
     await ctx.db
       .update(files)
@@ -796,7 +854,7 @@ export function registerDevDbFilesAiRoutes(router: WorkerRouter): void {
       module: 'files',
       targetType: 'file',
       targetId: id,
-      details: { originalName: target.originalName },
+      details: { appId: target.appId, originalName: target.originalName },
       ipAddress: ctx.clientIp,
       userAgent: ctx.userAgent,
     });

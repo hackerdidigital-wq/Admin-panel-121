@@ -436,7 +436,11 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
     const appNameById = new Map(apps.map((a) => [a.id, a.name]));
 
     return jsonResponse({
-      flags: flags.map((f) => ({ ...f, appName: f.appId ? (appNameById.get(f.appId) ?? null) : null })),
+      flags: flags.map((f) => ({
+        ...f,
+        key: f.appId ? f.key.replace(new RegExp(`@app${f.appId}$`), '') : f.key,
+        appName: f.appId ? (appNameById.get(f.appId) ?? null) : null,
+      })),
       releases: releases.map((r) => ({ ...r, appName: r.appId ? (appNameById.get(r.appId) ?? null) : null })),
       settings: appSettings,
     });
@@ -456,36 +460,57 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
     }>(ctx.request);
 
     const appId = parseOptionalAppId(body.appId);
-    const key = sanitizeText(body.key, 80).toLowerCase().replace(/[^a-z0-9._-]/g, '-');
+    const rawKey = sanitizeText(body.key, 80).toLowerCase().replace(/[^a-z0-9._-]/g, '-');
     const name = sanitizeText(body.name, 100);
-    if (!key || !name) {
+    if (!rawKey || !name) {
       return errorResponse(400, 'Feature flag key and name are required.');
     }
 
-    const created = await ctx.db
-      .insert(featureFlags)
-      .values({
-        appId,
-        key,
-        name,
-        description: sanitizeText(body.description, 240),
-        isEnabled: Boolean(body.isEnabled),
-        rolloutPercentage: Math.min(100, Math.max(0, Number(body.rolloutPercentage) || 100)),
-        updatedBy: ctx.adminUser!.id,
-      })
-      .onConflictDoUpdate({
-        target: featureFlags.key,
-        set: {
-          appId,
+    const scopedKey = appId ? `${rawKey}@app${appId}` : rawKey;
+    const candidates = await ctx.db
+      .select()
+      .from(featureFlags)
+      .where(sql`${featureFlags.key} IN (${rawKey}, ${scopedKey})`);
+
+    const sameScopeExisting = candidates.find((c) => (c.appId ?? null) === (appId ?? null));
+    const otherScopeConflict = candidates.find(
+      (c) => c.key === rawKey && (c.appId ?? null) !== (appId ?? null)
+    );
+
+    let savedFlag: typeof featureFlags.$inferSelect;
+    const rollout = Math.min(100, Math.max(0, Number(body.rolloutPercentage) || 100));
+    const descText = sanitizeText(body.description, 240);
+
+    if (sameScopeExisting) {
+      const updated = await ctx.db
+        .update(featureFlags)
+        .set({
           name,
-          description: sanitizeText(body.description, 240),
+          description: descText,
           isEnabled: Boolean(body.isEnabled),
-          rolloutPercentage: Math.min(100, Math.max(0, Number(body.rolloutPercentage) || 100)),
+          rolloutPercentage: rollout,
           updatedBy: ctx.adminUser!.id,
           updatedAt: new Date(),
-        },
-      })
-      .returning();
+        })
+        .where(eq(featureFlags.id, sameScopeExisting.id))
+        .returning();
+      savedFlag = updated[0];
+    } else {
+      const storageKey = otherScopeConflict || appId ? scopedKey : rawKey;
+      const inserted = await ctx.db
+        .insert(featureFlags)
+        .values({
+          appId,
+          key: storageKey,
+          name,
+          description: descText,
+          isEnabled: Boolean(body.isEnabled),
+          rolloutPercentage: rollout,
+          updatedBy: ctx.adminUser!.id,
+        })
+        .returning();
+      savedFlag = inserted[0];
+    }
 
     await writeAuditLog(ctx.db, {
       actorId: ctx.adminUser!.id,
@@ -493,13 +518,21 @@ export function registerCommerceAndAppRoutes(router: WorkerRouter): void {
       action: 'app.flag_upserted',
       module: 'app',
       targetType: 'feature_flag',
-      targetId: key,
+      targetId: rawKey,
       details: { isEnabled: Boolean(body.isEnabled), appId },
       ipAddress: ctx.clientIp,
       userAgent: ctx.userAgent,
     });
 
-    return jsonResponse({ flag: created[0] }, 201);
+    return jsonResponse(
+      {
+        flag: {
+          ...savedFlag,
+          key: savedFlag.appId ? savedFlag.key.replace(new RegExp(`@app${savedFlag.appId}$`), '') : savedFlag.key,
+        },
+      },
+      201
+    );
   });
 
   router.patch('/api/app/flags/:id', async (ctx: WorkerContext) => {

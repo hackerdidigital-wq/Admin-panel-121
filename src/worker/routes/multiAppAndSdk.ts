@@ -3,7 +3,9 @@ import {
   adConfigs,
   apiLogs,
   appApiKeys,
+  appCollections,
   appEvents,
+  appModules,
   appReleases,
   appUsers,
   connectedApps,
@@ -19,18 +21,44 @@ import {
   webhooks,
 } from '../../db/schema.ts';
 import { ensureSystemSeeded } from '../../db/seed.ts';
+import {
+  buildBackendNamespace,
+  generateCollectionMigrationSql,
+  inspectAppSpecification,
+  type CollectionFieldSpec,
+  type IntegrationMode,
+} from '../../lib/appDiscovery.ts';
 import { toCsv } from '../../lib/csv.ts';
 import { computeSha256, generateSessionToken, generateUid, sanitizeText } from '../../lib/security.ts';
 import { parsePaginationQuery, slugify } from '../../lib/validation.ts';
 import { writeAuditLog } from '../audit.ts';
-import { requirePermission } from '../auth.ts';
+import { requireAppAccess, requirePermission } from '../auth.ts';
 import { errorResponse, jsonResponse, queryRecord, readJsonBody } from '../http.ts';
 import type { WorkerRouter } from '../router.ts';
 import type { WorkerContext } from '../types.ts';
 
-const VALID_PLATFORMS = ['android', 'game', 'website', 'ios', 'api'] as const;
+export const VALID_PLATFORMS = ['android', 'unity', 'game', 'website', 'ios', 'api'] as const;
 const VALID_APP_STATUSES = ['connected', 'disconnected', 'maintenance'] as const;
-const VALID_KEY_SCOPES = ['config:read', 'users:write', 'events:write', 'commerce:write'] as const;
+export const VALID_KEY_SCOPES = [
+  'config:read',
+  'users:write',
+  'events:write',
+  'commerce:write',
+  'data:read',
+  'data:write',
+  'storage:write',
+  'admin:sync',
+  '*',
+] as const;
+export const DEFAULT_KEY_SCOPES = [
+  'config:read',
+  'users:write',
+  'events:write',
+  'commerce:write',
+  'data:read',
+  'data:write',
+  'storage:write',
+] as const;
 const VALID_APP_USER_STATUSES = ['active', 'banned', 'suspended'] as const;
 const VALID_ROLE_SCOPES = ['owner', 'admin', 'editor', 'viewer'] as const;
 
@@ -178,7 +206,7 @@ function generateLiveApiKey(): string {
   return `aegis_live_${generateSessionToken().slice(0, 40)}`;
 }
 
-async function authenticateSdkRequest(
+export async function authenticateSdkRequest(
   ctx: WorkerContext,
   requiredScope: (typeof VALID_KEY_SCOPES)[number]
 ): Promise<
@@ -200,7 +228,8 @@ async function authenticateSdkRequest(
       ok: false,
       response: errorResponse(
         401,
-        'Unauthorized: X-App-Id header and API key (X-API-Key or Authorization: Bearer) are required.'
+        'Unauthorized: X-App-Id header and API key (X-API-Key or Authorization: Bearer) are required.',
+        { code: 'MISSING_CREDENTIALS', requiredScope }
       ),
     };
   }
@@ -212,7 +241,13 @@ async function authenticateSdkRequest(
     .limit(1);
   const app = appRows[0];
   if (!app) {
-    return { ok: false, response: errorResponse(404, 'Application not found for supplied X-App-Id.') };
+    return {
+      ok: false,
+      response: errorResponse(404, 'Application not found for supplied X-App-Id.', {
+        code: 'APP_NOT_FOUND',
+        appUid: rawAppUid,
+      }),
+    };
   }
 
   ctx.sdkAppId = app.id;
@@ -226,24 +261,44 @@ async function authenticateSdkRequest(
   const apiKeyRow = keyRows[0];
 
   if (!apiKeyRow || !apiKeyRow.isActive || apiKeyRow.revokedAt) {
-    return { ok: false, response: errorResponse(401, 'Invalid or revoked API key for this application.') };
+    return {
+      ok: false,
+      response: errorResponse(401, 'Invalid or revoked API key for this application.', {
+        code: 'INVALID_OR_REVOKED_KEY',
+        appUid: app.appUid,
+      }),
+    };
   }
   if (apiKeyRow.expiresAt && new Date(apiKeyRow.expiresAt).getTime() <= Date.now()) {
-    return { ok: false, response: errorResponse(401, 'API key has expired.') };
+    return {
+      ok: false,
+      response: errorResponse(401, 'API key has expired.', {
+        code: 'KEY_EXPIRED',
+        appUid: app.appUid,
+      }),
+    };
   }
 
   const scopes = Array.isArray(apiKeyRow.scopes) ? apiKeyRow.scopes : [];
   if (!scopes.includes(requiredScope) && !scopes.includes('*')) {
     return {
       ok: false,
-      response: errorResponse(403, `Forbidden: API key is missing required scope "${requiredScope}".`),
+      response: errorResponse(403, `Forbidden: API key is missing required scope "${requiredScope}".`, {
+        code: 'MISSING_SCOPE',
+        requiredScope,
+        availableScopes: scopes,
+        appUid: app.appUid,
+      }),
     };
   }
 
   if (app.status === 'disconnected') {
     return {
       ok: false,
-      response: errorResponse(403, 'Application connection is currently disabled (disconnected).'),
+      response: errorResponse(403, 'Application connection is currently disabled (disconnected).', {
+        code: 'APP_DISCONNECTED',
+        appUid: app.appUid,
+      }),
     };
   }
 
@@ -439,6 +494,18 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       createInitialKey?: boolean;
       initialKeyName?: string;
       scopes?: string[];
+      integrationMode?: string;
+      backendBaseUrl?: string;
+      manifestUrl?: string;
+      modelsText?: string;
+      enabledModules?: string[];
+      discoveredCapabilities?: Record<string, unknown>;
+      proposedCollections?: Array<{
+        slug: string;
+        name: string;
+        description?: string;
+        fields?: CollectionFieldSpec[];
+      }>;
     }>(ctx.request);
 
     const name = sanitizeText(body.name, 120);
@@ -458,6 +525,46 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     const slug = existingSlug.length > 0 ? `${baseSlug}-${Date.now().toString(36)}` : baseSlug;
     const appUid = generateUid('app');
     const webhookSecret = `whsec_${generateSessionToken().slice(0, 32)}`;
+    const backendNamespace = buildBackendNamespace(slug, appUid);
+
+    const integrationMode: IntegrationMode =
+      body.integrationMode === 'external_backend' || body.integrationMode === 'hybrid'
+        ? body.integrationMode
+        : body.backendBaseUrl
+          ? 'hybrid'
+          : 'aegis_managed';
+
+    const discovery = inspectAppSpecification({
+      name,
+      platform,
+      packageOrDomain: sanitizeText(body.packageOrDomain, 200),
+      integrationMode,
+      backendBaseUrl: sanitizeText(body.backendBaseUrl, 300),
+      manifestUrl: sanitizeText(body.manifestUrl, 300),
+      modelsText: typeof body.modelsText === 'string' ? body.modelsText.slice(0, 6000) : '',
+    });
+
+    const finalCapabilities =
+      body.discoveredCapabilities && typeof body.discoveredCapabilities === 'object'
+        ? body.discoveredCapabilities
+        : (discovery as unknown as Record<string, unknown>);
+
+    const finalEnabledModules =
+      Array.isArray(body.enabledModules) && body.enabledModules.length > 0
+        ? body.enabledModules.map((m) => sanitizeText(m, 50)).filter(Boolean)
+        : discovery.recommendedModules;
+
+    const fullCtrl =
+      typeof (finalCapabilities as { fullControlAvailable?: unknown }).fullControlAvailable === 'boolean'
+        ? Boolean((finalCapabilities as { fullControlAvailable?: boolean }).fullControlAvailable)
+        : discovery.fullControlAvailable;
+
+    const syncStatus =
+      integrationMode === 'aegis_managed'
+        ? 'verified'
+        : fullCtrl
+          ? 'verified'
+          : 'partial';
 
     const created = await ctx.db
       .insert(connectedApps)
@@ -478,11 +585,69 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
         adsEnabled: body.adsEnabled !== undefined ? Boolean(body.adsEnabled) : true,
         webhookSecret,
         healthStatus: 'healthy',
+        backendNamespace,
+        integrationMode,
+        backendBaseUrl: sanitizeText(body.backendBaseUrl, 300),
+        manifestUrl: sanitizeText(body.manifestUrl, 300),
+        discoveredCapabilities: finalCapabilities,
+        enabledModules: finalEnabledModules,
+        syncStatus,
         createdBy: ctx.adminUser!.id,
       })
       .returning();
 
     const app = created[0];
+
+    // Provision isolated collections and custom module bindings for the new app
+    const collectionsToProvision =
+      Array.isArray(body.proposedCollections) && body.proposedCollections.length > 0
+        ? body.proposedCollections
+        : discovery.proposedCollections;
+
+    const provisionedCollections: Array<{ id: number; slug: string; name: string }> = [];
+    for (const col of collectionsToProvision.slice(0, 12)) {
+      const colSlug = sanitizeText(col.slug, 50).toLowerCase().replace(/[^a-z0-9_]+/g, '_');
+      if (!colSlug) continue;
+      const fields = Array.isArray(col.fields) ? col.fields : [];
+      const migrationSql = generateCollectionMigrationSql(backendNamespace, colSlug, fields);
+      const insertedCol = await ctx.db
+        .insert(appCollections)
+        .values({
+          appId: app.id,
+          slug: colSlug,
+          name: sanitizeText(col.name, 100) || colSlug,
+          description: sanitizeText(col.description || '', 300),
+          fieldsJson: fields,
+          permissionsJson: { read: 'sdk', write: 'sdk' },
+          migrationSql,
+          createdBy: ctx.adminUser!.id,
+        })
+        .onConflictDoNothing()
+        .returning({ id: appCollections.id, slug: appCollections.slug, name: appCollections.name });
+      if (insertedCol[0]) {
+        provisionedCollections.push(insertedCol[0]);
+        await ctx.db
+          .insert(appModules)
+          .values({
+            appId: app.id,
+            moduleKey: `col_${colSlug}`,
+            name: insertedCol[0].name,
+            category: 'collection',
+            status: 'active',
+            configJson: { collectionSlug: colSlug },
+            migrationSql,
+            apiEndpoints: [
+              { method: 'GET', path: `/api/v1/sdk/data/${colSlug}`, scope: 'data:read' },
+              { method: 'POST', path: `/api/v1/sdk/data/${colSlug}`, scope: 'data:write' },
+            ],
+            uiSchema: { fields },
+            createdBy: ctx.adminUser!.id,
+          })
+          .onConflictDoNothing()
+          .catch(() => {});
+      }
+    }
+
     let initialApiKey: string | null = null;
     let initialKeyRecord: Record<string, unknown> | null = null;
 
@@ -491,8 +656,8 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       const keyHash = await computeSha256(initialApiKey);
       const requestedScopes = Array.isArray(body.scopes)
         ? body.scopes.filter((s) => VALID_KEY_SCOPES.includes(s as (typeof VALID_KEY_SCOPES)[number]))
-        : [...VALID_KEY_SCOPES];
-      const scopes = requestedScopes.length > 0 ? requestedScopes : [...VALID_KEY_SCOPES];
+        : [...DEFAULT_KEY_SCOPES];
+      const scopes = requestedScopes.length > 0 ? requestedScopes : [...DEFAULT_KEY_SCOPES];
       const keyRows = await ctx.db
         .insert(appApiKeys)
         .values({
@@ -523,7 +688,14 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       module: 'apps',
       targetType: 'connected_app',
       targetId: app.id,
-      details: { appUid: app.appUid, name: app.name, platform: app.platform },
+      details: {
+        appUid: app.appUid,
+        name: app.name,
+        platform: app.platform,
+        backendNamespace,
+        integrationMode,
+        collectionsProvisioned: provisionedCollections.length,
+      },
       ipAddress: ctx.clientIp,
       userAgent: ctx.userAgent,
     });
@@ -533,16 +705,17 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
         app: { ...app, webhookSecret: undefined },
         initialApiKey,
         initialKeyRecord,
+        provisionedCollections,
       },
       201
     );
   });
 
   router.get('/api/apps/:id', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.read');
+    const id = Number(ctx.params.id);
+    const permFail = await requireAppAccess(ctx, id, 'apps.read');
     if (permFail) return permFail;
 
-    const id = Number(ctx.params.id);
     const rows = await ctx.db.select().from(connectedApps).where(eq(connectedApps.id, id)).limit(1);
     const app = rows[0];
     if (!app) return errorResponse(404, 'Connected app not found.');
@@ -602,10 +775,10 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   });
 
   router.patch('/api/apps/:id', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.manage');
+    const id = Number(ctx.params.id);
+    const permFail = await requireAppAccess(ctx, id, 'apps.manage');
     if (permFail) return permFail;
 
-    const id = Number(ctx.params.id);
     const existingRows = await ctx.db.select().from(connectedApps).where(eq(connectedApps.id, id)).limit(1);
     const existing = existingRows[0];
     if (!existing) return errorResponse(404, 'Connected app not found.');
@@ -623,6 +796,10 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       admobAppId?: string;
       adsEnabled?: boolean;
       healthStatus?: string;
+      integrationMode?: string;
+      backendBaseUrl?: string;
+      manifestUrl?: string;
+      enabledModules?: string[];
       settingsJson?: Record<string, unknown>;
       rotateWebhookSecret?: boolean;
     }>(ctx.request);
@@ -634,6 +811,10 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     const nextPlatform = VALID_PLATFORMS.includes((body.platform || '') as (typeof VALID_PLATFORMS)[number])
       ? (body.platform as string)
       : existing.platform;
+
+    const nextIntegrationMode = ['aegis_managed', 'external_backend', 'hybrid'].includes(body.integrationMode || '')
+      ? (body.integrationMode as string)
+      : existing.integrationMode;
 
     const updated = await ctx.db
       .update(connectedApps)
@@ -667,6 +848,14 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
         healthStatus: ['healthy', 'degraded', 'offline'].includes(body.healthStatus || '')
           ? (body.healthStatus as string)
           : existing.healthStatus,
+        integrationMode: nextIntegrationMode,
+        backendBaseUrl:
+          body.backendBaseUrl !== undefined ? sanitizeText(body.backendBaseUrl, 300) : existing.backendBaseUrl,
+        manifestUrl:
+          body.manifestUrl !== undefined ? sanitizeText(body.manifestUrl, 300) : existing.manifestUrl,
+        enabledModules: Array.isArray(body.enabledModules)
+          ? body.enabledModules.map((m) => sanitizeText(m, 50)).filter(Boolean)
+          : existing.enabledModules,
         settingsJson:
           body.settingsJson && typeof body.settingsJson === 'object'
             ? body.settingsJson
@@ -705,10 +894,10 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   });
 
   router.delete('/api/apps/:id', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.manage');
+    const id = Number(ctx.params.id);
+    const permFail = await requireAppAccess(ctx, id, 'apps.manage');
     if (permFail) return permFail;
 
-    const id = Number(ctx.params.id);
     const existing = await ctx.db.select().from(connectedApps).where(eq(connectedApps.id, id)).limit(1);
     if (!existing[0]) return errorResponse(404, 'Connected app not found.');
 
@@ -731,10 +920,10 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
 
   // ---- APP API KEYS MANAGEMENT ----
   router.get('/api/apps/:id/keys', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, ['apps.keys', 'apps.read']);
+    const appId = Number(ctx.params.id);
+    const permFail = await requireAppAccess(ctx, appId, ['apps.keys', 'apps.read']);
     if (permFail) return permFail;
 
-    const appId = Number(ctx.params.id);
     const keys = await ctx.db
       .select({
         id: appApiKeys.id,
@@ -756,10 +945,10 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
   });
 
   router.post('/api/apps/:id/keys', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.keys');
+    const appId = Number(ctx.params.id);
+    const permFail = await requireAppAccess(ctx, appId, 'apps.keys');
     if (permFail) return permFail;
 
-    const appId = Number(ctx.params.id);
     const appRows = await ctx.db.select().from(connectedApps).where(eq(connectedApps.id, appId)).limit(1);
     if (!appRows[0]) return errorResponse(404, 'Connected app not found.');
 
@@ -772,8 +961,8 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     const name = sanitizeText(body.name, 80) || `API Key ${new Date().toISOString().slice(0, 10)}`;
     const requestedScopes = Array.isArray(body.scopes)
       ? body.scopes.filter((s) => VALID_KEY_SCOPES.includes(s as (typeof VALID_KEY_SCOPES)[number]))
-      : [...VALID_KEY_SCOPES];
-    const scopes = requestedScopes.length > 0 ? requestedScopes : [...VALID_KEY_SCOPES];
+      : [...DEFAULT_KEY_SCOPES];
+    const scopes = requestedScopes.length > 0 ? requestedScopes : [...DEFAULT_KEY_SCOPES];
 
     const expiresInDays = Number(body.expiresInDays);
     const expiresAt =
@@ -1576,7 +1765,7 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     const { app } = auth;
 
     const latencyStart = Date.now();
-    const [flags, ads, latestRelease, publishedNotices] = await Promise.all([
+    const [flags, ads, latestRelease, publishedNotices, collections] = await Promise.all([
       ctx.db
         .select({
           key: featureFlags.key,
@@ -1619,6 +1808,13 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
         .where(and(eq(contentItems.appId, app.id), eq(contentItems.status, 'published')))
         .orderBy(desc(contentItems.publishedAt))
         .limit(10),
+      ctx.db
+        .select({
+          slug: appCollections.slug,
+          name: appCollections.name,
+        })
+        .from(appCollections)
+        .where(eq(appCollections.appId, app.id)),
     ]);
 
     const heartbeatLatency = Math.max(1, Date.now() - latencyStart);
@@ -1632,12 +1828,26 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       .where(eq(connectedApps.id, app.id))
       .catch(() => {});
 
+    const cleanFlags: Record<string, { enabled: boolean; rolloutPercentage: number; scoped: boolean }> = {};
+    for (const f of flags) {
+      const publicKey = f.appId ? f.key.replace(new RegExp(`@app${f.appId}$`), '') : f.key;
+      if (!(publicKey in cleanFlags) || f.appId === app.id) {
+        cleanFlags[publicKey] = {
+          enabled: f.isEnabled,
+          rolloutPercentage: f.rolloutPercentage,
+          scoped: f.appId !== null,
+        };
+      }
+    }
+
     return jsonResponse({
       app: {
         appUid: app.appUid,
         slug: app.slug,
         name: app.name,
         platform: app.platform,
+        backendNamespace: app.backendNamespace,
+        integrationMode: app.integrationMode,
         status: app.status,
         maintenanceMode: app.status === 'maintenance',
         maintenanceMessage: app.maintenanceMessage,
@@ -1650,12 +1860,8 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
         admobAppId: app.admobAppId,
         placements: app.adsEnabled ? ads : [],
       },
-      featureFlags: Object.fromEntries(
-        flags.map((f) => [
-          f.key,
-          { enabled: f.isEnabled, rolloutPercentage: f.rolloutPercentage, scoped: f.appId !== null },
-        ])
-      ),
+      featureFlags: cleanFlags,
+      collections,
       notices: publishedNotices,
     });
   });

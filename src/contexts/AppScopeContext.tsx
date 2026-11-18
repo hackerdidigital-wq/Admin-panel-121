@@ -7,7 +7,7 @@ export interface ConnectedAppRecord {
   appUid: string;
   slug: string;
   name: string;
-  platform: 'android' | 'game' | 'website' | 'ios' | 'api' | string;
+  platform: 'android' | 'unity' | 'game' | 'website' | 'ios' | 'api' | string;
   packageOrDomain: string;
   description: string;
   status: 'connected' | 'disconnected' | 'maintenance' | string;
@@ -21,6 +21,13 @@ export interface ConnectedAppRecord {
   lastHeartbeatAt: string | null;
   lastLatencyMs: number;
   errorCount24h: number;
+  backendNamespace?: string;
+  integrationMode?: 'aegis_managed' | 'external_backend' | 'hybrid' | string;
+  backendBaseUrl?: string;
+  manifestUrl?: string;
+  discoveredCapabilities?: Record<string, unknown>;
+  enabledModules?: string[];
+  syncStatus?: 'unverified' | 'verified' | 'partial' | 'sync_failed' | string;
   endUsersCount?: number;
   activeKeysCount?: number;
   hasWebhookSecret?: boolean;

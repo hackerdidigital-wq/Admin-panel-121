@@ -134,10 +134,10 @@ export function applyCorsHeaders(
 export function applySdkCorsHeaders(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set('Access-Control-Allow-Origin', '*');
-  headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   headers.set(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-App-Id, X-API-Key, X-Requested-With'
+    'Content-Type, Authorization, X-App-Id, X-API-Key, X-CSRF-Token, X-Aegis-Signature, X-Requested-With, Accept'
   );
   return new Response(response.body, {
     status: response.status,

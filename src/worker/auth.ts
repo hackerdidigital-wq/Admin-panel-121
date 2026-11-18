@@ -5,6 +5,7 @@ import {
   rolePermissions,
   roles,
   systemSettings,
+  userAppPermissions,
   userPermissionOverrides,
   userSessions,
   users,
@@ -274,3 +275,80 @@ export async function requirePermission(
   }
   return null;
 }
+
+export async function requireAppAccess(
+  ctx: WorkerContext,
+  appId: number,
+  required: string | string[]
+): Promise<Response | null> {
+  if (!ctx.adminUser) {
+    const authFail = await requireAuth(ctx);
+    if (authFail) return authFail;
+  }
+  const admin = ctx.adminUser!;
+  if (admin.roleSlug === 'super_admin' || admin.permissions.has('*')) {
+    return null;
+  }
+
+  const requiredList = Array.isArray(required) ? required : [required];
+  const grants = await ctx.db
+    .select()
+    .from(userAppPermissions)
+    .where(eq(userAppPermissions.userId, admin.id));
+
+  if (grants.length > 0) {
+    const appGrant = grants.find((g) => g.appId === appId);
+    if (!appGrant) {
+      await writeAuditLog(ctx.db, {
+        actorId: admin.id,
+        actorEmail: admin.email,
+        action: 'app_permission.denied',
+        module: 'security',
+        targetType: 'connected_app',
+        targetId: String(appId),
+        details: { reason: 'not_assigned_to_app', required: requiredList },
+        ipAddress: ctx.clientIp,
+        userAgent: ctx.userAgent,
+        status: 'denied',
+      });
+      return errorResponse(
+        403,
+        `Forbidden: Your account is restricted to assigned applications and cannot access App #${appId}.`
+      );
+    }
+
+    const grantPerms = new Set(Array.isArray(appGrant.permissions) ? appGrant.permissions : []);
+    const isReadOnly = requiredList.every((p) => p.endsWith('.read') || p === 'dashboard.read');
+    const roleSatisfies =
+      appGrant.roleScope === 'owner' ||
+      appGrant.roleScope === 'admin' ||
+      (appGrant.roleScope === 'editor' && !requiredList.some((p) => p.endsWith('.delete') || p === 'apps.keys')) ||
+      (appGrant.roleScope === 'viewer' && isReadOnly);
+    const explicitPermSatisfies =
+      grantPerms.has('*') || requiredList.some((p) => grantPerms.has(p));
+
+    if (roleSatisfies || explicitPermSatisfies) {
+      return null;
+    }
+
+    await writeAuditLog(ctx.db, {
+      actorId: admin.id,
+      actorEmail: admin.email,
+      action: 'app_permission.denied',
+      module: 'security',
+      targetType: 'connected_app',
+      targetId: String(appId),
+      details: { roleScope: appGrant.roleScope, required: requiredList },
+      ipAddress: ctx.clientIp,
+      userAgent: ctx.userAgent,
+      status: 'denied',
+    });
+    return errorResponse(
+      403,
+      `Forbidden: App role "${appGrant.roleScope}" does not permit this operation on App #${appId}.`
+    );
+  }
+
+  return requirePermission(ctx, required);
+}
+
