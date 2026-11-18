@@ -87,7 +87,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       needsSetup: boolean;
       databaseReady: boolean;
       emailProviderConfigured: boolean;
-    }>('/auth/status', { timeoutMs: 6_000 });
+    }>('/auth/status', { timeoutMs: 15_000 });
     setNeedsSetup(Boolean(status.needsSetup));
     setEmailProviderConfigured(Boolean(status.emailProviderConfigured));
     return status;
@@ -108,7 +108,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         user: AdminUserProfile;
         permissions: string[];
         sessions: SessionInfo[];
-      }>('/auth/session', { timeoutMs: 6_000 });
+      }>('/auth/session', { timeoutMs: 15_000 });
 
       setAdminUser(data.user);
       setPermissions(new Set(data.permissions));

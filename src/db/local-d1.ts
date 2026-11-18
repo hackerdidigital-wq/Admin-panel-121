@@ -83,7 +83,10 @@ class LocalD1PreparedStatement implements D1PreparedStatement {
   }
 }
 
-export function createLocalD1Database(sqliteFilePath?: string): {
+export function createLocalD1Database(
+  sqliteFilePath?: string,
+  options: { skipMigrations?: boolean } = {}
+): {
   d1: D1Database;
   raw: DatabaseSync;
 } {
@@ -94,10 +97,12 @@ export function createLocalD1Database(sqliteFilePath?: string): {
   const rawDb = new DatabaseSync(targetPath);
   rawDb.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
 
-  const migrationPath = path.resolve(process.cwd(), 'migrations', '0001_init.sql');
-  if (fs.existsSync(migrationPath)) {
-    const migrationSql = fs.readFileSync(migrationPath, 'utf8');
-    rawDb.exec(migrationSql);
+  if (!options.skipMigrations) {
+    const migrationPath = path.resolve(process.cwd(), 'migrations', '0001_init.sql');
+    if (fs.existsSync(migrationPath)) {
+      const migrationSql = fs.readFileSync(migrationPath, 'utf8');
+      rawDb.exec(migrationSql);
+    }
   }
 
   const d1: D1Database = {

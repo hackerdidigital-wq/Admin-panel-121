@@ -1,13 +1,17 @@
 import { handleApiRequest } from './app.ts';
 import { withSecurityHeaders } from './http.ts';
-import type { WorkerEnv } from './types.ts';
+import type { WorkerEnv, WorkerExecutionContext } from './types.ts';
 
 export default {
-  async fetch(request: Request, env: WorkerEnv): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: WorkerEnv,
+    ctx?: WorkerExecutionContext
+  ): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith('/api/')) {
-      return handleApiRequest(request, env);
+      return handleApiRequest(request, env, ctx);
     }
 
     if (env.ASSETS) {

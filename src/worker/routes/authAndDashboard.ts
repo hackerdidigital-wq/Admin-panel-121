@@ -80,7 +80,7 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
   // Public bootstrap/auth status check (never exposes user data)
   router.get('/api/auth/status', async (ctx: WorkerContext) => {
     try {
-      await ensureSystemSeeded(ctx.db, ctx.env.GITHUB_DEFAULT_REPO || '');
+      await ensureSystemSeeded(ctx.env.DB, ctx.env.GITHUB_DEFAULT_REPO || '');
       const configuredRows = await ctx.db
         .select({ count: sql<number>`cast(count(*) as integer)` })
         .from(users)
@@ -152,268 +152,278 @@ export function registerAuthAndDashboardRoutes(router: WorkerRouter): void {
 
   // First-Time Administrator Password Setup (locked once an active admin password exists)
   router.post('/api/auth/setup', async (ctx: WorkerContext) => {
-    await ensureSystemSeeded(ctx.db, ctx.env.GITHUB_DEFAULT_REPO || '');
+    try {
+      await ensureSystemSeeded(ctx.env.DB, ctx.env.GITHUB_DEFAULT_REPO || '');
 
-    const configuredRows = await ctx.db
-      .select({ count: sql<number>`cast(count(*) as integer)` })
-      .from(users)
-      .where(and(isNotNull(users.passwordHash), eq(users.status, 'active')));
-    if (Number(configuredRows[0]?.count ?? 0) > 0) {
-      return errorResponse(
-        409,
-        'Initial administrator setup is locked because an administrator password has already been configured.'
-      );
-    }
-
-    const body = await readJsonBody<{
-      email?: string;
-      displayName?: string;
-      password?: string;
-    }>(ctx.request);
-
-    const password = typeof body.password === 'string' ? body.password : '';
-    const policyCheck = validatePasswordStrength(password);
-    if (!policyCheck.valid) {
-      return errorResponse(400, policyCheck.errors[0]);
-    }
-
-    const roleRows = await ctx.db
-      .select()
-      .from(roles)
-      .where(eq(roles.slug, 'super_admin'))
-      .limit(1);
-    const superAdminRole = roleRows[0];
-
-    const passwordHash = await hashPassword(password);
-    const now = new Date();
-
-    // Preserve existing administrator records if any exist without a passwordHash
-    const existingRows = await ctx.db
-      .select()
-      .from(users)
-      .orderBy(desc(users.isAdmin), asc(users.id))
-      .limit(1);
-
-    let admin: typeof users.$inferSelect;
-    if (existingRows[0]) {
-      const updated = await ctx.db
-        .update(users)
-        .set({
-          passwordHash,
-          passwordUpdatedAt: now,
-          roleId: existingRows[0].roleId ?? superAdminRole?.id ?? null,
-          status: 'active',
-          isAdmin: true,
-          failedLoginAttempts: 0,
-          lockedUntil: null,
-          lastSeenAt: now,
-          lastLoginAt: now,
-          lastIp: ctx.clientIp,
-          updatedAt: now,
-        })
-        .where(eq(users.id, existingRows[0].id))
-        .returning();
-      admin = updated[0];
-    } else {
-      const requestedEmail = sanitizeText(body.email, 160).toLowerCase();
-      const internalEmail = isValidEmail(requestedEmail) ? requestedEmail : 'admin@aegis.local';
-      const displayName = sanitizeText(body.displayName, 120) || 'Administrator';
-      const inserted = await ctx.db
-        .insert(users)
-        .values({
-          uid: generateUid('adm'),
-          email: internalEmail,
-          passwordHash,
-          passwordUpdatedAt: now,
-          displayName,
-          roleId: superAdminRole?.id ?? null,
-          status: 'active',
-          isAdmin: true,
-          emailVerified: true,
-          lastSeenAt: now,
-          lastLoginAt: now,
-          lastIp: ctx.clientIp,
-        })
-        .returning();
-      admin = inserted[0];
-    }
-
-    const { rawToken } = await createUserSession(ctx.db, admin.id, ctx.clientIp, ctx.userAgent, 480);
-
-    await writeAuditLog(ctx.db, {
-      actorId: admin.id,
-      actorEmail: admin.email,
-      action: 'admin.bootstrap',
-      module: 'auth',
-      targetType: 'user',
-      targetId: admin.id,
-      details: { roleSlug: 'super_admin', authMode: 'password_only' },
-      ipAddress: ctx.clientIp,
-      userAgent: ctx.userAgent,
-    });
-
-    const secure = isHttpsRequest(ctx.request);
-    const existingCsrf = parseCookies(ctx.request)[CSRF_COOKIE_NAME];
-    const csrfToken =
-      existingCsrf && /^[a-f0-9]{32,128}$/i.test(existingCsrf)
-        ? existingCsrf
-        : generateSessionToken();
-    return jsonResponse(
-      { ok: true, userId: admin.id, csrfToken },
-      201,
-      {
-        'Set-Cookie': [
-          buildSessionCookieHeader(rawToken, 480 * 60, secure),
-          buildCsrfCookieHeader(csrfToken, secure),
-        ],
+      const configuredRows = await ctx.db
+        .select({ count: sql<number>`cast(count(*) as integer)` })
+        .from(users)
+        .where(and(isNotNull(users.passwordHash), eq(users.status, 'active')));
+      if (Number(configuredRows[0]?.count ?? 0) > 0) {
+        return errorResponse(
+          409,
+          'Initial administrator setup is locked because an administrator password has already been configured.'
+        );
       }
-    );
+
+      const body = await readJsonBody<{
+        email?: string;
+        displayName?: string;
+        password?: string;
+      }>(ctx.request);
+
+      const password = typeof body.password === 'string' ? body.password : '';
+      const policyCheck = validatePasswordStrength(password);
+      if (!policyCheck.valid) {
+        return errorResponse(400, policyCheck.errors[0]);
+      }
+
+      const roleRows = await ctx.db
+        .select()
+        .from(roles)
+        .where(eq(roles.slug, 'super_admin'))
+        .limit(1);
+      const superAdminRole = roleRows[0];
+
+      const passwordHash = await hashPassword(password);
+      const now = new Date();
+
+      // Preserve existing administrator records if any exist without a passwordHash
+      const existingRows = await ctx.db
+        .select()
+        .from(users)
+        .orderBy(desc(users.isAdmin), asc(users.id))
+        .limit(1);
+
+      let admin: typeof users.$inferSelect;
+      if (existingRows[0]) {
+        const updated = await ctx.db
+          .update(users)
+          .set({
+            passwordHash,
+            passwordUpdatedAt: now,
+            roleId: existingRows[0].roleId ?? superAdminRole?.id ?? null,
+            status: 'active',
+            isAdmin: true,
+            failedLoginAttempts: 0,
+            lockedUntil: null,
+            lastSeenAt: now,
+            lastLoginAt: now,
+            lastIp: ctx.clientIp,
+            updatedAt: now,
+          })
+          .where(eq(users.id, existingRows[0].id))
+          .returning();
+        admin = updated[0];
+      } else {
+        const requestedEmail = sanitizeText(body.email, 160).toLowerCase();
+        const internalEmail = isValidEmail(requestedEmail) ? requestedEmail : 'admin@aegis.local';
+        const displayName = sanitizeText(body.displayName, 120) || 'Administrator';
+        const inserted = await ctx.db
+          .insert(users)
+          .values({
+            uid: generateUid('adm'),
+            email: internalEmail,
+            passwordHash,
+            passwordUpdatedAt: now,
+            displayName,
+            roleId: superAdminRole?.id ?? null,
+            status: 'active',
+            isAdmin: true,
+            emailVerified: true,
+            lastSeenAt: now,
+            lastLoginAt: now,
+            lastIp: ctx.clientIp,
+          })
+          .returning();
+        admin = inserted[0];
+      }
+
+      const { rawToken } = await createUserSession(ctx.db, admin.id, ctx.clientIp, ctx.userAgent, 480);
+
+      await writeAuditLog(ctx.db, {
+        actorId: admin.id,
+        actorEmail: admin.email,
+        action: 'admin.bootstrap',
+        module: 'auth',
+        targetType: 'user',
+        targetId: admin.id,
+        details: { roleSlug: 'super_admin', authMode: 'password_only' },
+        ipAddress: ctx.clientIp,
+        userAgent: ctx.userAgent,
+      });
+
+      const secure = isHttpsRequest(ctx.request);
+      const existingCsrf = parseCookies(ctx.request)[CSRF_COOKIE_NAME];
+      const csrfToken =
+        existingCsrf && /^[a-f0-9]{32,128}$/i.test(existingCsrf)
+          ? existingCsrf
+          : generateSessionToken();
+      return jsonResponse(
+        { ok: true, userId: admin.id, csrfToken },
+        201,
+        {
+          'Set-Cookie': [
+            buildSessionCookieHeader(rawToken, 480 * 60, secure),
+            buildCsrfCookieHeader(csrfToken, secure),
+          ],
+        }
+      );
+    } catch (err) {
+      console.error('Setup failed due to database error:', err);
+      return errorResponse(503, err instanceof Error ? err.message : 'Database unavailable');
+    }
   });
 
   // Password-Only Administrator Sign-In (+ optional TOTP 2FA verification)
   router.post('/api/auth/login', async (ctx: WorkerContext) => {
-    await ensureSystemSeeded(ctx.db, ctx.env.GITHUB_DEFAULT_REPO || '');
+    try {
+      await ensureSystemSeeded(ctx.env.DB, ctx.env.GITHUB_DEFAULT_REPO || '');
 
-    const limitResult = loginLimiter.consume(`login:${ctx.clientIp}`);
-    if (!limitResult.allowed) {
-      return errorResponse(429, 'Too many login attempts. Please wait a few minutes and retry.', {
-        retryAfterMs: limitResult.resetMs,
-      });
-    }
-
-    const body = await readJsonBody<{
-      email?: string;
-      password?: string;
-      totpCode?: string;
-    }>(ctx.request);
-
-    const optionalEmail = sanitizeText(body.email, 160).toLowerCase();
-    const password = typeof body.password === 'string' ? body.password : '';
-    const totpCode = sanitizeText(body.totpCode, 16);
-
-    if (!password) {
-      return errorResponse(400, 'Administrator password is required.');
-    }
-
-    const candidates = optionalEmail
-      ? await ctx.db
-          .select()
-          .from(users)
-          .where(and(eq(users.email, optionalEmail), isNotNull(users.passwordHash)))
-          .limit(1)
-      : await ctx.db
-          .select()
-          .from(users)
-          .where(isNotNull(users.passwordHash))
-          .orderBy(desc(users.isAdmin), asc(users.id))
-          .limit(25);
-
-    let matchedUser: typeof users.$inferSelect | null = null;
-    for (const candidate of candidates) {
-      if (await verifyPassword(password, candidate.passwordHash)) {
-        matchedUser = candidate;
-        break;
+      const limitResult = loginLimiter.consume(`login:${ctx.clientIp}`);
+      if (!limitResult.allowed) {
+        return errorResponse(429, 'Too many login attempts. Please wait a few minutes and retry.', {
+          retryAfterMs: limitResult.resetMs,
+        });
       }
-    }
 
-    if (!matchedUser) {
-      await writeAuditLog(ctx.db, {
-        actorEmail: optionalEmail || 'administrator',
-        action: 'auth.login_failed',
-        module: 'security',
-        details: { reason: 'invalid_password' },
-        status: 'failure',
-        ipAddress: ctx.clientIp,
-        userAgent: ctx.userAgent,
-      });
-      return errorResponse(401, 'Invalid administrator password.');
-    }
+      const body = await readJsonBody<{
+        email?: string;
+        password?: string;
+        totpCode?: string;
+      }>(ctx.request);
 
-    if (
-      matchedUser.status === 'suspended' ||
-      matchedUser.status === 'banned' ||
-      matchedUser.status === 'deleted' ||
-      matchedUser.status === 'inactive'
-    ) {
-      return errorResponse(403, `Account access blocked (${matchedUser.status}).`);
-    }
+      const optionalEmail = sanitizeText(body.email, 160).toLowerCase();
+      const password = typeof body.password === 'string' ? body.password : '';
+      const totpCode = sanitizeText(body.totpCode, 16);
 
-    // Optional TOTP 2FA verification when enabled
-    if (matchedUser.twoFactorEnabled && matchedUser.twoFactorSecret) {
-      if (!totpCode) {
-        return jsonResponse({ requiresTwoFactor: true });
+      if (!password) {
+        return errorResponse(400, 'Administrator password is required.');
       }
-      const validTotp = await verifyTotpToken(matchedUser.twoFactorSecret, totpCode);
-      if (!validTotp) {
+
+      const candidates = optionalEmail
+        ? await ctx.db
+            .select()
+            .from(users)
+            .where(and(eq(users.email, optionalEmail), isNotNull(users.passwordHash)))
+            .limit(1)
+        : await ctx.db
+            .select()
+            .from(users)
+            .where(isNotNull(users.passwordHash))
+            .orderBy(desc(users.isAdmin), asc(users.id))
+            .limit(10);
+
+      let matchedUser: typeof users.$inferSelect | null = null;
+      for (const candidate of candidates) {
+        if (await verifyPassword(password, candidate.passwordHash)) {
+          matchedUser = candidate;
+          break;
+        }
+      }
+
+      if (!matchedUser) {
         await writeAuditLog(ctx.db, {
-          actorId: matchedUser.id,
-          actorEmail: matchedUser.email,
-          action: 'auth.2fa_failed',
+          actorEmail: optionalEmail || 'administrator',
+          action: 'auth.login_failed',
           module: 'security',
+          details: { reason: 'invalid_password' },
           status: 'failure',
           ipAddress: ctx.clientIp,
           userAgent: ctx.userAgent,
         });
-        return errorResponse(401, 'Invalid 2FA verification code.');
+        return errorResponse(401, 'Invalid administrator password.');
       }
+
+      if (
+        matchedUser.status === 'suspended' ||
+        matchedUser.status === 'banned' ||
+        matchedUser.status === 'deleted' ||
+        matchedUser.status === 'inactive'
+      ) {
+        return errorResponse(403, `Account access blocked (${matchedUser.status}).`);
+      }
+
+      // Optional TOTP 2FA verification when enabled
+      if (matchedUser.twoFactorEnabled && matchedUser.twoFactorSecret) {
+        if (!totpCode) {
+          return jsonResponse({ requiresTwoFactor: true });
+        }
+        const validTotp = await verifyTotpToken(matchedUser.twoFactorSecret, totpCode);
+        if (!validTotp) {
+          await writeAuditLog(ctx.db, {
+            actorId: matchedUser.id,
+            actorEmail: matchedUser.email,
+            action: 'auth.2fa_failed',
+            module: 'security',
+            status: 'failure',
+            ipAddress: ctx.clientIp,
+            userAgent: ctx.userAgent,
+          });
+          return errorResponse(401, 'Invalid 2FA verification code.');
+        }
+      }
+
+      // Read session timeout setting
+      const timeoutRow = await ctx.db
+        .select()
+        .from(systemSettings)
+        .where(eq(systemSettings.key, 'security.sessionTimeoutMinutes'))
+        .limit(1);
+      const timeoutMinutes = Number(timeoutRow[0]?.value) || 480;
+
+      const now = new Date();
+      await ctx.db
+        .update(users)
+        .set({
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+          lastLoginAt: now,
+          lastSeenAt: now,
+          lastIp: ctx.clientIp,
+          updatedAt: now,
+        })
+        .where(eq(users.id, matchedUser.id));
+
+      const { rawToken } = await createUserSession(
+        ctx.db,
+        matchedUser.id,
+        ctx.clientIp,
+        ctx.userAgent,
+        timeoutMinutes
+      );
+
+      await writeAuditLog(ctx.db, {
+        actorId: matchedUser.id,
+        actorEmail: matchedUser.email,
+        action: 'auth.login_success',
+        module: 'auth',
+        targetType: 'user',
+        targetId: matchedUser.id,
+        ipAddress: ctx.clientIp,
+        userAgent: ctx.userAgent,
+      });
+
+      const secure = isHttpsRequest(ctx.request);
+      const existingCsrf = parseCookies(ctx.request)[CSRF_COOKIE_NAME];
+      const csrfToken =
+        existingCsrf && /^[a-f0-9]{32,128}$/i.test(existingCsrf)
+          ? existingCsrf
+          : generateSessionToken();
+      return jsonResponse(
+        { ok: true, requiresTwoFactor: false, csrfToken },
+        200,
+        {
+          'Set-Cookie': [
+            buildSessionCookieHeader(rawToken, timeoutMinutes * 60, secure),
+            buildCsrfCookieHeader(csrfToken, secure),
+          ],
+        }
+      );
+    } catch (err) {
+      console.error('Login failed due to database error:', err);
+      return errorResponse(503, err instanceof Error ? err.message : 'Database unavailable');
     }
-
-    // Read session timeout setting
-    const timeoutRow = await ctx.db
-      .select()
-      .from(systemSettings)
-      .where(eq(systemSettings.key, 'security.sessionTimeoutMinutes'))
-      .limit(1);
-    const timeoutMinutes = Number(timeoutRow[0]?.value) || 480;
-
-    const now = new Date();
-    await ctx.db
-      .update(users)
-      .set({
-        failedLoginAttempts: 0,
-        lockedUntil: null,
-        lastLoginAt: now,
-        lastSeenAt: now,
-        lastIp: ctx.clientIp,
-        updatedAt: now,
-      })
-      .where(eq(users.id, matchedUser.id));
-
-    const { rawToken } = await createUserSession(
-      ctx.db,
-      matchedUser.id,
-      ctx.clientIp,
-      ctx.userAgent,
-      timeoutMinutes
-    );
-
-    await writeAuditLog(ctx.db, {
-      actorId: matchedUser.id,
-      actorEmail: matchedUser.email,
-      action: 'auth.login_success',
-      module: 'auth',
-      targetType: 'user',
-      targetId: matchedUser.id,
-      ipAddress: ctx.clientIp,
-      userAgent: ctx.userAgent,
-    });
-
-    const secure = isHttpsRequest(ctx.request);
-    const existingCsrf = parseCookies(ctx.request)[CSRF_COOKIE_NAME];
-    const csrfToken =
-      existingCsrf && /^[a-f0-9]{32,128}$/i.test(existingCsrf)
-        ? existingCsrf
-        : generateSessionToken();
-    return jsonResponse(
-      { ok: true, requiresTwoFactor: false, csrfToken },
-      200,
-      {
-        'Set-Cookie': [
-          buildSessionCookieHeader(rawToken, timeoutMinutes * 60, secure),
-          buildCsrfCookieHeader(csrfToken, secure),
-        ],
-      }
-    );
   });
 
   // Honest password reset request (checks whether external email provider exists)

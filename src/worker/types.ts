@@ -28,6 +28,11 @@ export interface AssetsFetcher {
   fetch(request: Request | string): Promise<Response>;
 }
 
+export interface WorkerExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
+  passThroughOnException?(): void;
+}
+
 export interface WorkerEnv {
   DB: D1Database;
   ASSETS?: AssetsFetcher;

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createLocalD1Database } from '../src/db/local-d1.ts';
+import { hashPassword } from '../src/lib/security.ts';
 import { handleApiRequest } from '../src/worker/app.ts';
 import type { WorkerEnv } from '../src/worker/types.ts';
 
@@ -383,4 +384,151 @@ test('Reverse-proxy CSRF Origin validation, X-Forwarded-Host spoofing guard, dou
     close();
   }
 });
+
+test('Auto-upgrades empty minimal 3-column users table on Cloudflare D1 without 503 errors', async () => {
+  const { d1, raw } = createLocalD1Database(':memory:', { skipMigrations: true });
+  try {
+    // Recreate exact minimal table from user report with no other tables
+    raw.exec(`
+      CREATE TABLE users (
+        id TEXT PRIMARY KEY,
+        password_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+
+    const env: WorkerEnv = { DB: d1, APP_ENV: 'test' };
+
+    const statusRes = await apiCall(env, 'GET', '/api/auth/status');
+    assert.equal(statusRes.status, 200);
+    const statusBody = (await statusRes.json()) as { needsSetup: boolean; databaseReady: boolean };
+    assert.equal(statusBody.needsSetup, true);
+    assert.equal(statusBody.databaseReady, true);
+
+    const setupRes = await apiCall(env, 'POST', '/api/auth/setup', {
+      body: { password: 'WorkerD1#Setup2026' },
+    });
+    assert.equal(setupRes.status, 201);
+    const cookie = extractCookieValue(setupRes);
+    assert.ok(cookie.startsWith('aegis_session='));
+
+    const sessionRes = await apiCall(env, 'GET', '/api/auth/session', { cookie });
+    assert.equal(sessionRes.status, 200);
+    const sessionBody = (await sessionRes.json()) as { user: { roleSlug: string } };
+    assert.equal(sessionBody.user.roleSlug, 'super_admin');
+
+    const logoutRes = await apiCall(env, 'POST', '/api/auth/logout', { cookie });
+    assert.equal(logoutRes.status, 200);
+
+    const loginRes = await apiCall(env, 'POST', '/api/auth/login', {
+      body: { password: 'WorkerD1#Setup2026' },
+    });
+    assert.equal(loginRes.status, 200);
+  } finally {
+    raw.close();
+  }
+});
+
+test('Preserves existing password hash when auto-upgrading minimal 3-column users table and grants super_admin access', async () => {
+  const { d1, raw } = createLocalD1Database(':memory:', { skipMigrations: true });
+  try {
+    raw.exec(`
+      CREATE TABLE users (
+        id TEXT PRIMARY KEY,
+        password_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    const existingHash = await hashPassword('PreExisting#Admin99');
+    raw
+      .prepare('INSERT INTO users (id, password_hash, created_at) VALUES (?, ?, ?)')
+      .run('adm_manual_01', existingHash, '2026-11-17T00:00:00.000Z');
+
+    const env: WorkerEnv = { DB: d1, APP_ENV: 'test' };
+
+    const statusRes = await apiCall(env, 'GET', '/api/auth/status');
+    assert.equal(statusRes.status, 200);
+    const statusBody = (await statusRes.json()) as { needsSetup: boolean };
+    assert.equal(statusBody.needsSetup, false);
+
+    const loginRes = await apiCall(env, 'POST', '/api/auth/login', {
+      body: { password: 'PreExisting#Admin99' },
+    });
+    assert.equal(loginRes.status, 200);
+    const cookie = extractCookieValue(loginRes);
+
+    const sessionRes = await apiCall(env, 'GET', '/api/auth/session', { cookie });
+    assert.equal(sessionRes.status, 200);
+    const sessionBody = (await sessionRes.json()) as {
+      user: { uid: string; roleSlug: string };
+      permissions: string[];
+    };
+    assert.equal(sessionBody.user.uid, 'adm_manual_01');
+    assert.equal(sessionBody.user.roleSlug, 'super_admin');
+    assert.ok(sessionBody.permissions.includes('database.inspect'));
+  } finally {
+    raw.close();
+  }
+});
+
+test('Missing D1 binding returns clean 503 JSON, ExecutionContext.waitUntil records telemetry, and warm requests skip seeding queries', async () => {
+  const missingDbRes = await handleApiRequest(
+    new Request('http://localhost:3000/api/auth/status', {
+      headers: { host: 'localhost:3000' },
+    }),
+    {} as WorkerEnv
+  );
+  assert.equal(missingDbRes.status, 503);
+  const missingBody = (await missingDbRes.json()) as { error: string };
+  assert.ok(missingBody.error.includes('DB'));
+
+  const { d1, raw } = createLocalD1Database(':memory:');
+  try {
+    let prepareCalls = 0;
+    const countedD1: typeof d1 = {
+      prepare(q: string) {
+        prepareCalls += 1;
+        return d1.prepare(q);
+      },
+      batch(stmts) {
+        return d1.batch(stmts);
+      },
+      exec(q: string) {
+        return d1.exec(q);
+      },
+    };
+    const env: WorkerEnv = { DB: countedD1, APP_ENV: 'test' };
+    const waitUntilPromises: Promise<unknown>[] = [];
+
+    // Cold call initializes seed via batched statements
+    const coldRes = await handleApiRequest(
+      new Request('http://localhost:3000/api/auth/status', {
+        headers: { host: 'localhost:3000' },
+      }),
+      env,
+      {
+        waitUntil(p) {
+          waitUntilPromises.push(p);
+        },
+      }
+    );
+    assert.equal(coldRes.status, 200);
+    await Promise.all(waitUntilPromises);
+    assert.ok(waitUntilPromises.length >= 1);
+
+    // Warm call must NOT re-run seed inserts (only auth/status + rate limit reads <= 5 prepares)
+    prepareCalls = 0;
+    const warmRes = await handleApiRequest(
+      new Request('http://localhost:3000/api/auth/status', {
+        headers: { host: 'localhost:3000' },
+      }),
+      env
+    );
+    assert.equal(warmRes.status, 200);
+    assert.ok(prepareCalls <= 6, `Expected <= 6 prepares on warm request, got ${prepareCalls}`);
+  } finally {
+    raw.close();
+  }
+});
+
 

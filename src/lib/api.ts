@@ -33,7 +33,7 @@ export async function apiRequest<T = unknown>(
   path: string,
   options: RequestInit & { timeoutMs?: number } = {}
 ): Promise<T> {
-  const { timeoutMs = 12_000, ...fetchOptions } = options;
+  const { timeoutMs = 20_000, ...fetchOptions } = options;
   const headers = new Headers(fetchOptions.headers);
   const method = (fetchOptions.method || 'GET').toUpperCase();
 

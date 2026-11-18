@@ -86,7 +86,7 @@ export async function createUserSession(
 }
 
 export async function loadAuthenticatedAdmin(ctx: WorkerContext): Promise<AuthenticatedAdmin> {
-  await ensureSystemSeeded(ctx.db, ctx.env.GITHUB_DEFAULT_REPO || '');
+  await ensureSystemSeeded(ctx.env.DB, ctx.env.GITHUB_DEFAULT_REPO || '');
   const rawToken = extractSessionToken(ctx.request);
   if (!rawToken) {
     throw new Error('MISSING_SESSION');
@@ -168,12 +168,10 @@ export async function loadAuthenticatedAdmin(ctx: WorkerContext): Promise<Authen
   let hierarchyLevel = 20;
   let rolePerms: string[] = [];
 
-  if (userRow.roleId) {
-    const roleRows = await ctx.db
-      .select()
-      .from(roles)
-      .where(eq(roles.id, userRow.roleId))
-      .limit(1);
+  if (userRow.roleId || userRow.isAdmin) {
+    const roleRows = userRow.roleId
+      ? await ctx.db.select().from(roles).where(eq(roles.id, userRow.roleId)).limit(1)
+      : await ctx.db.select().from(roles).where(eq(roles.slug, 'super_admin')).limit(1);
     const roleRow = roleRows[0];
     if (roleRow) {
       roleSlug = roleRow.slug;

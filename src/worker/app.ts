@@ -1,4 +1,5 @@
 import { eq } from 'drizzle-orm';
+import { isSchemaBootstrapped } from '../db/bootstrap.ts';
 import { createDb } from '../db/index.ts';
 import { apiLogs, systemSettings } from '../db/schema.ts';
 import { SlidingWindowLimiter } from '../lib/security.ts';
@@ -17,7 +18,7 @@ import { registerContentAndCommsRoutes } from './routes/contentAndComms.ts';
 import { registerDevDbFilesAiRoutes } from './routes/devDbFilesAi.ts';
 import { registerOpsAndSecurityRoutes } from './routes/opsAndSecurity.ts';
 import { registerUsersAndRolesRoutes } from './routes/usersAndRoles.ts';
-import type { WorkerContext, WorkerEnv } from './types.ts';
+import type { WorkerContext, WorkerEnv, WorkerExecutionContext } from './types.ts';
 
 let configuredLimitPerMin = 180;
 let rateLimiter = new SlidingWindowLimiter(configuredLimitPerMin, 60_000);
@@ -36,11 +37,14 @@ function createRouter(): WorkerRouter {
 
 const router = createRouter();
 
-export async function handleApiRequest(request: Request, env: WorkerEnv): Promise<Response> {
+export async function handleApiRequest(
+  request: Request,
+  env: WorkerEnv,
+  executionCtx?: WorkerExecutionContext
+): Promise<Response> {
   const url = new URL(request.url);
   const clientIp = getClientIp(request);
   const userAgent = request.headers.get('user-agent') || '';
-  const db = createDb(env.DB);
 
   // Strict CORS preflight handling
   if (request.method.toUpperCase() === 'OPTIONS') {
@@ -59,9 +63,24 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     return withSecurityHeaders(applyCorsHeaders(request, csrfFail, env.APP_URL));
   }
 
-  // Sliding-window rate limit backed by DB setting
+  if (!env?.DB) {
+    return withSecurityHeaders(
+      applyCorsHeaders(
+        request,
+        errorResponse(
+          503,
+          'Cloudflare D1 database binding "DB" is not configured. Check wrangler.toml [[d1_databases]] binding.'
+        ),
+        env?.APP_URL
+      )
+    );
+  }
+
+  const db = createDb(env.DB);
+
+  // Sliding-window rate limit backed by DB setting (only query once schema is bootstrapped)
   const now = Date.now();
-  if (now - lastLimitSync > 30_000) {
+  if (isSchemaBootstrapped(env.DB) && now - lastLimitSync > 30_000) {
     lastLimitSync = now;
     try {
       const rows = await db
@@ -75,7 +94,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         rateLimiter = new SlidingWindowLimiter(configuredLimitPerMin, 60_000);
       }
     } catch {
-      // Keep default limit before first migration/seed
+      // Keep default limit if setting is unavailable
     }
   }
 
@@ -124,9 +143,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
 
   const durationMs = Date.now() - startedAt;
 
-  // Record API telemetry asynchronously without blocking response
-  if (url.pathname !== '/api/realtime/snapshot') {
-    void db
+  // Record API telemetry asynchronously using ExecutionContext.waitUntil on Cloudflare Workers
+  if (url.pathname !== '/api/realtime/snapshot' && isSchemaBootstrapped(env.DB)) {
+    const telemetryPromise = db
       .insert(apiLogs)
       .values({
         method: request.method.slice(0, 10),
@@ -138,6 +157,12 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         errorMessage: response.status >= 400 ? `HTTP ${response.status}` : '',
       })
       .catch(() => {});
+
+    if (executionCtx && typeof executionCtx.waitUntil === 'function') {
+      executionCtx.waitUntil(telemetryPromise);
+    } else {
+      void telemetryPromise;
+    }
   }
 
   const headers = new Headers(response.headers);
