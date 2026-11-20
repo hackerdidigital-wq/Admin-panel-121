@@ -446,19 +446,27 @@ export const AppsCenterPage: React.FC<{
   const runLiveSdkTest = async (uidArg?: string, keyArg?: string) => {
     const uid = (uidArg ?? sdkTestAppUid).trim();
     const apiKey = (keyArg ?? sdkTestKey).trim();
-    if (!uid || !apiKey) {
-      pushToast({ type: 'error', title: 'App UID and API Key are required to test the SDK endpoint' });
+    if (!uid && !apiKey) {
+      pushToast({ type: 'error', title: 'App UID/Package Name or API Key is required to test the SDK endpoint' });
       return;
     }
     setSdkTesting(true);
     setSdkTestOutput(null);
     try {
-      const res = await fetch('/api/v1/sdk/config', {
+      const looksLikePkg = uid.includes('.') && !uid.startsWith('app_');
+      const targetUrl = !apiKey && looksLikePkg
+        ? `/api/v1/sdk/remote-config?package_name=${encodeURIComponent(uid)}`
+        : '/api/v1/sdk/config';
+      const headers: Record<string, string> = {};
+      if (uid) {
+        headers[looksLikePkg ? 'X-Package-Name' : 'X-App-Id'] = uid;
+      }
+      if (apiKey) {
+        headers['X-API-Key'] = apiKey;
+      }
+      const res = await fetch(targetUrl, {
         method: 'GET',
-        headers: {
-          'X-App-Id': uid,
-          'X-API-Key': apiKey,
-        },
+        headers,
       });
       const text = await res.text();
       let formatted = text;
@@ -467,7 +475,7 @@ export const AppsCenterPage: React.FC<{
       } catch {
         // leave plain text
       }
-      setSdkTestOutput(`HTTP ${res.status}\n${formatted}`);
+      setSdkTestOutput(`GET ${targetUrl} -> HTTP ${res.status}\n${formatted}`);
       pushToast({
         type: res.ok ? 'success' : 'error',
         title: res.ok ? 'Live SDK connection verified (200 OK)' : `SDK returned HTTP ${res.status}`,
@@ -527,6 +535,8 @@ export const AppsCenterPage: React.FC<{
       e.preventDefault();
       setCreatingApp(true);
       try {
+        const trimmedPkg = newPkg.trim();
+        const isUrl = trimmedPkg.includes('://');
         const res = await apiRequest<{
           app: ConnectedAppRecord;
           initialApiKey: string | null;
@@ -535,7 +545,8 @@ export const AppsCenterPage: React.FC<{
           body: JSON.stringify({
             name: newName,
             platform: newPlatform,
-            packageOrDomain: newPkg,
+            packageName: !isUrl && trimmedPkg ? trimmedPkg : undefined,
+            packageOrDomain: trimmedPkg,
             description: newDesc,
             currentVersion: newVersion,
             minSupportedVersion: newMinVersion,
@@ -553,7 +564,7 @@ export const AppsCenterPage: React.FC<{
           }),
         });
         setCreatedCredentials({ app: res.app, apiKey: res.initialApiKey });
-        setSdkTestAppUid(res.app.appUid);
+        setSdkTestAppUid(res.app.packageName || res.app.appUid);
         if (res.initialApiKey) setSdkTestKey(res.initialApiKey);
         setSdkTestOutput(null);
         setNewName('');
@@ -638,17 +649,41 @@ export const AppsCenterPage: React.FC<{
                 Open Dedicated App Console
               </button>
             </div>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2 text-xs">
+            <div className="mt-3 grid gap-3 sm:grid-cols-3 text-xs">
+              <div className="rounded-lg border border-emerald-200 bg-white p-3 dark:border-emerald-900 dark:bg-slate-900">
+                <p className="text-slate-500">Package Name (package_name)</p>
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <code className="truncate font-mono font-semibold text-slate-900 dark:text-slate-100">
+                    {createdCredentials.app.packageName || createdCredentials.app.packageOrDomain || '-'}
+                  </code>
+                  {(createdCredentials.app.packageName || createdCredentials.app.packageOrDomain) && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void copyText(
+                          'new-pkg',
+                          createdCredentials.app.packageName || createdCredentials.app.packageOrDomain,
+                          'package_name'
+                        )
+                      }
+                      className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-700"
+                    >
+                      {copiedId === 'new-pkg' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                      Copy
+                    </button>
+                  )}
+                </div>
+              </div>
               <div className="rounded-lg border border-emerald-200 bg-white p-3 dark:border-emerald-900 dark:bg-slate-900">
                 <p className="text-slate-500">App UID (X-App-Id)</p>
                 <div className="mt-1 flex items-center justify-between gap-2">
-                  <code className="font-mono font-semibold text-slate-900 dark:text-slate-100">
+                  <code className="truncate font-mono font-semibold text-slate-900 dark:text-slate-100">
                     {createdCredentials.app.appUid}
                   </code>
                   <button
                     type="button"
                     onClick={() => void copyText('new-uid', createdCredentials.app.appUid, 'App UID')}
-                    className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-700"
+                    className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-700"
                   >
                     {copiedId === 'new-uid' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
                     Copy
@@ -716,9 +751,9 @@ export const AppsCenterPage: React.FC<{
                 {
                   id: 'android',
                   label: 'Android App',
-                  name: 'Atlas Android App',
+                  name: 'Candy Mind Match',
                   platform: 'android',
-                  pkg: 'com.studio.atlasapp',
+                  pkg: 'com.cyberking.candymindmatch',
                   models: '',
                 },
                 {
@@ -815,13 +850,13 @@ export const AppsCenterPage: React.FC<{
               </div>
               <div>
                 <label htmlFor="connect-app-pkg" className="block font-medium">
-                  Package Name or Domain
+                  Package Name (package_name) or Domain
                 </label>
                 <input
                   id="connect-app-pkg"
                   value={newPkg}
                   onChange={(e) => setNewPkg(e.target.value)}
-                  placeholder="com.studio.game or app.example.com"
+                  placeholder="com.cyberking.candymindmatch or app.example.com"
                   className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
                 />
               </div>
@@ -991,13 +1026,13 @@ export const AppsCenterPage: React.FC<{
             <div className="grid gap-2 sm:grid-cols-2 text-xs">
               <div>
                 <label htmlFor="sdk-test-uid" className="block font-medium">
-                  X-App-Id
+                  X-App-Id or X-Package-Name
                 </label>
                 <input
                   id="sdk-test-uid"
                   value={sdkTestAppUid}
                   onChange={(e) => setSdkTestAppUid(e.target.value)}
-                  placeholder="app_..."
+                  placeholder="com.cyberking.candymindmatch or app_..."
                   className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
                 />
               </div>
@@ -2111,6 +2146,7 @@ export const AppsCenterPage: React.FC<{
       return (
         a.name.toLowerCase().includes(q) ||
         a.appUid.toLowerCase().includes(q) ||
+        (a.packageName || '').toLowerCase().includes(q) ||
         (a.packageOrDomain || '').toLowerCase().includes(q)
       );
     }
@@ -2121,12 +2157,15 @@ export const AppsCenterPage: React.FC<{
     e.preventDefault();
     if (!editingApp) return;
     try {
+      const pkgInput = (editingApp.packageName ?? editingApp.packageOrDomain ?? '').trim();
+      const isUrl = pkgInput.includes('://');
       await apiRequest(`/apps/${editingApp.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
           name: editingApp.name,
           platform: editingApp.platform,
-          packageOrDomain: editingApp.packageOrDomain,
+          packageName: isUrl ? '' : pkgInput,
+          packageOrDomain: editingApp.packageOrDomain || pkgInput,
           status: editingApp.status,
           currentVersion: editingApp.currentVersion,
           minSupportedVersion: editingApp.minSupportedVersion,
@@ -2285,7 +2324,8 @@ export const AppsCenterPage: React.FC<{
                     )}
                   </div>
                   <p className="mt-1 font-mono text-[11px] text-slate-500">
-                    {app.appUid} {app.backendNamespace ? `· ${app.backendNamespace}` : ''} {app.packageOrDomain ? `· ${app.packageOrDomain}` : ''} ·{' '}
+                    {(app.packageName || app.packageOrDomain) ? `${app.packageName || app.packageOrDomain} · ` : ''}
+                    {app.appUid} {app.backendNamespace ? `· ${app.backendNamespace}` : ''} ·{' '}
                     {app.stats.totalUsers} users ({app.stats.bannedUsers} banned) · {app.stats.activeKeysCount} active keys ·{' '}
                     Ads ${(app.stats.adRevenueCents / 100).toFixed(2)} · {app.stats.errors24h} errors
                   </p>
@@ -2433,10 +2473,17 @@ export const AppsCenterPage: React.FC<{
               </div>
             </div>
             <div>
-              <label className="block font-medium">Package / Domain</label>
+              <label className="block font-medium">Package Name (package_name) or Domain</label>
               <input
-                value={editingApp.packageOrDomain}
-                onChange={(e) => setEditingApp({ ...editingApp, packageOrDomain: e.target.value })}
+                value={editingApp.packageName || editingApp.packageOrDomain}
+                onChange={(e) =>
+                  setEditingApp({
+                    ...editingApp,
+                    packageName: e.target.value,
+                    packageOrDomain: e.target.value,
+                  })
+                }
+                placeholder="com.cyberking.candymindmatch"
                 className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
               />
             </div>

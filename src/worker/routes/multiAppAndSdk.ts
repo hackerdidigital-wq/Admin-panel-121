@@ -2,11 +2,14 @@ import { and, desc, eq, gte, sql, type SQL } from 'drizzle-orm';
 import {
   adConfigs,
   apiLogs,
+  appAnnouncements,
   appApiKeys,
   appCollections,
   appEvents,
+  appHeartbeats,
   appModules,
   appReleases,
+  appRemoteConfigs,
   appUsers,
   connectedApps,
   contentItems,
@@ -29,8 +32,13 @@ import {
   type IntegrationMode,
 } from '../../lib/appDiscovery.ts';
 import { toCsv } from '../../lib/csv.ts';
+import { derivePackageNameFromInput, normalizePackageName } from '../../lib/packageSync.ts';
 import { computeSha256, generateSessionToken, generateUid, sanitizeText } from '../../lib/security.ts';
 import { parsePaginationQuery, slugify } from '../../lib/validation.ts';
+import {
+  buildRemoteConfigPayload,
+  formatAnnouncementRow,
+} from './packageSync.ts';
 import { writeAuditLog } from '../audit.ts';
 import { requireAppAccess, requirePermission } from '../auth.ts';
 import { errorResponse, jsonResponse, queryRecord, readJsonBody } from '../http.ts';
@@ -236,7 +244,8 @@ function generateLiveApiKey(): string {
 
 export async function authenticateSdkRequest(
   ctx: WorkerContext,
-  requiredScope: (typeof VALID_KEY_SCOPES)[number]
+  requiredScope: (typeof VALID_KEY_SCOPES)[number],
+  packageNameHint = ''
 ): Promise<
   | { ok: true; app: typeof connectedApps.$inferSelect; apiKeyRow: typeof appApiKeys.$inferSelect }
   | { ok: false; response: Response }
@@ -247,35 +256,74 @@ export async function authenticateSdkRequest(
     ctx.request.headers.get('x-app-id') || ctx.url.searchParams.get('appId') || '',
     100
   );
+  const rawPkgHeaderOrQuery = sanitizeText(
+    packageNameHint ||
+      ctx.request.headers.get('x-package-name') ||
+      ctx.url.searchParams.get('package_name') ||
+      ctx.url.searchParams.get('packageName') ||
+      '',
+    180
+  );
+  const normalizedPkg = normalizePackageName(rawPkgHeaderOrQuery);
   const authHeader = ctx.request.headers.get('authorization') || '';
   const bearerKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   const rawApiKey = (ctx.request.headers.get('x-api-key') || bearerKey).trim();
 
-  if (!rawAppUid || !rawApiKey) {
+  if ((!rawAppUid && !normalizedPkg) || !rawApiKey) {
     return {
       ok: false,
       response: errorResponse(
         401,
-        'Unauthorized: X-App-Id header and API key (X-API-Key or Authorization: Bearer) are required.',
+        'Unauthorized: X-App-Id (or X-Package-Name) header and API key (X-API-Key or Authorization: Bearer) are required.',
         { code: 'MISSING_CREDENTIALS', requiredScope }
       ),
     };
   }
 
-  const appRows = await ctx.db
-    .select()
-    .from(connectedApps)
-    .where(sql`(${connectedApps.appUid} = ${rawAppUid} OR ${connectedApps.slug} = ${rawAppUid})`)
-    .limit(1);
-  const app = appRows[0];
+  let app: typeof connectedApps.$inferSelect | undefined;
+  if (rawAppUid) {
+    const appRows = await ctx.db
+      .select()
+      .from(connectedApps)
+      .where(
+        sql`(${connectedApps.appUid} = ${rawAppUid} OR ${connectedApps.slug} = ${rawAppUid} OR lower(${connectedApps.packageName}) = ${rawAppUid.toLowerCase()})`
+      )
+      .limit(1);
+    app = appRows[0];
+  } else if (normalizedPkg) {
+    const pkgRows = await ctx.db
+      .select()
+      .from(connectedApps)
+      .where(
+        sql`(lower(${connectedApps.packageName}) = ${normalizedPkg} OR lower(trim(${connectedApps.packageOrDomain})) = ${normalizedPkg})`
+      )
+      .limit(1);
+    app = pkgRows[0];
+  }
+
   if (!app) {
     return {
       ok: false,
-      response: errorResponse(404, 'Application not found for supplied X-App-Id.', {
+      response: errorResponse(404, 'Application not found for supplied X-App-Id or package_name.', {
         code: 'APP_NOT_FOUND',
-        appUid: rawAppUid,
+        appUid: rawAppUid || undefined,
+        package_name: normalizedPkg || undefined,
       }),
     };
+  }
+
+  if (rawAppUid && normalizedPkg) {
+    const appPkg = normalizePackageName(app.packageName || app.packageOrDomain);
+    if (appPkg && appPkg !== normalizedPkg) {
+      return {
+        ok: false,
+        response: errorResponse(403, 'Forbidden: Supplied package_name does not match X-App-Id.', {
+          code: 'APP_PACKAGE_MISMATCH',
+          appUid: app.appUid,
+          package_name: normalizedPkg,
+        }),
+      };
+    }
   }
 
   ctx.sdkAppId = app.id;
@@ -451,6 +499,7 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     const platform = sanitizeText(q.platform || 'all', 30);
     const status = sanitizeText(q.status || 'all', 30);
     const search = sanitizeText(q.search || '', 100).toLowerCase();
+    const pkgFilter = normalizePackageName(q.package_name || q.packageName || '');
 
     const conditions: SQL[] = [];
     if (platform !== 'all' && VALID_PLATFORMS.includes(platform as (typeof VALID_PLATFORMS)[number])) {
@@ -459,10 +508,15 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     if (status !== 'all' && VALID_APP_STATUSES.includes(status as (typeof VALID_APP_STATUSES)[number])) {
       conditions.push(eq(connectedApps.status, status));
     }
+    if (pkgFilter) {
+      conditions.push(
+        sql`(lower(${connectedApps.packageName}) = ${pkgFilter} OR lower(trim(${connectedApps.packageOrDomain})) = ${pkgFilter})`
+      );
+    }
     if (search) {
       const pattern = `%${search}%`;
       conditions.push(
-        sql`(lower(${connectedApps.name}) LIKE ${pattern} OR lower(${connectedApps.appUid}) LIKE ${pattern} OR lower(${connectedApps.packageOrDomain}) LIKE ${pattern})`
+        sql`(lower(${connectedApps.name}) LIKE ${pattern} OR lower(${connectedApps.appUid}) LIKE ${pattern} OR lower(${connectedApps.packageName}) LIKE ${pattern} OR lower(${connectedApps.packageOrDomain}) LIKE ${pattern})`
       );
     }
 
@@ -511,6 +565,8 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     const body = await readJsonBody<{
       name?: string;
       platform?: string;
+      packageName?: string;
+      package_name?: string;
       packageOrDomain?: string;
       description?: string;
       currentVersion?: string;
@@ -541,6 +597,28 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       return errorResponse(400, 'Application name is required.');
     }
 
+    const pkgResolved = derivePackageNameFromInput(
+      body.package_name ?? body.packageName,
+      body.packageOrDomain
+    );
+    if (pkgResolved.error) {
+      return errorResponse(400, pkgResolved.error);
+    }
+    if (pkgResolved.packageName) {
+      const dupPkg = await ctx.db
+        .select({ id: connectedApps.id, appUid: connectedApps.appUid })
+        .from(connectedApps)
+        .where(sql`lower(${connectedApps.packageName}) = ${pkgResolved.packageName}`)
+        .limit(1);
+      if (dupPkg[0]) {
+        return errorResponse(409, `An application with package_name "${pkgResolved.packageName}" already exists.`, {
+          code: 'PACKAGE_NAME_CONFLICT',
+          package_name: pkgResolved.packageName,
+          existingAppId: dupPkg[0].id,
+        });
+      }
+    }
+
     const platform = VALID_PLATFORMS.includes((body.platform || '') as (typeof VALID_PLATFORMS)[number])
       ? (body.platform as string)
       : 'android';
@@ -565,7 +643,7 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     const discovery = inspectAppSpecification({
       name,
       platform,
-      packageOrDomain: sanitizeText(body.packageOrDomain, 200),
+      packageOrDomain: pkgResolved.packageOrDomain,
       integrationMode,
       backendBaseUrl: sanitizeText(body.backendBaseUrl, 300),
       manifestUrl: sanitizeText(body.manifestUrl, 300),
@@ -601,7 +679,8 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
         slug,
         name,
         platform,
-        packageOrDomain: sanitizeText(body.packageOrDomain, 200),
+        packageName: pkgResolved.packageName,
+        packageOrDomain: pkgResolved.packageOrDomain,
         description: sanitizeText(body.description, 500),
         status: 'connected',
         currentVersion: sanitizeText(body.currentVersion || '1.0.0', 40) || '1.0.0',
@@ -625,6 +704,21 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       .returning();
 
     const app = created[0];
+
+    await ctx.db
+      .insert(appRemoteConfigs)
+      .values({
+        appId: app.id,
+        packageName: app.packageName || app.packageOrDomain,
+        maintenance: false,
+        killSwitch: false,
+        maintenanceMessage: app.maintenanceMessage,
+        bannerJson: {},
+        flagsJson: {},
+        updatedBy: ctx.adminUser!.id,
+      })
+      .onConflictDoNothing()
+      .catch(() => {});
 
     // Provision isolated collections and custom module bindings for the new app
     const collectionsToProvision =
@@ -814,6 +908,8 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     const body = await readJsonBody<{
       name?: string;
       platform?: string;
+      packageName?: string;
+      package_name?: string;
       packageOrDomain?: string;
       description?: string;
       status?: string;
@@ -832,6 +928,44 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       rotateWebhookSecret?: boolean;
     }>(ctx.request);
 
+    let nextPackageName = existing.packageName;
+    let nextPackageOrDomain =
+      body.packageOrDomain !== undefined
+        ? sanitizeText(body.packageOrDomain, 200)
+        : existing.packageOrDomain;
+
+    const suppliedPkgRaw = body.package_name ?? body.packageName;
+    if (suppliedPkgRaw !== undefined || body.packageOrDomain !== undefined) {
+      const resolvedPkg = derivePackageNameFromInput(
+        suppliedPkgRaw !== undefined ? suppliedPkgRaw : undefined,
+        nextPackageOrDomain
+      );
+      if (resolvedPkg.error) {
+        return errorResponse(400, resolvedPkg.error);
+      }
+      if (suppliedPkgRaw !== undefined) {
+        nextPackageName = resolvedPkg.packageName;
+        if (!nextPackageOrDomain && nextPackageName) {
+          nextPackageOrDomain = nextPackageName;
+        }
+      } else if (resolvedPkg.packageName) {
+        nextPackageName = resolvedPkg.packageName;
+      }
+      if (nextPackageName) {
+        const dup = await ctx.db
+          .select({ id: connectedApps.id })
+          .from(connectedApps)
+          .where(sql`lower(${connectedApps.packageName}) = ${nextPackageName} AND ${connectedApps.id} != ${id}`)
+          .limit(1);
+        if (dup[0]) {
+          return errorResponse(409, `Another application already owns package_name "${nextPackageName}".`, {
+            code: 'PACKAGE_NAME_CONFLICT',
+            package_name: nextPackageName,
+          });
+        }
+      }
+    }
+
     const nextStatus = VALID_APP_STATUSES.includes((body.status || '') as (typeof VALID_APP_STATUSES)[number])
       ? (body.status as string)
       : existing.status;
@@ -844,15 +978,18 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       ? (body.integrationMode as string)
       : existing.integrationMode;
 
+    const nextMaintenanceMessage =
+      body.maintenanceMessage !== undefined
+        ? sanitizeText(body.maintenanceMessage, 300)
+        : existing.maintenanceMessage;
+
     const updated = await ctx.db
       .update(connectedApps)
       .set({
         name: body.name !== undefined ? sanitizeText(body.name, 120) || existing.name : existing.name,
         platform: nextPlatform,
-        packageOrDomain:
-          body.packageOrDomain !== undefined
-            ? sanitizeText(body.packageOrDomain, 200)
-            : existing.packageOrDomain,
+        packageName: nextPackageName,
+        packageOrDomain: nextPackageOrDomain,
         description:
           body.description !== undefined ? sanitizeText(body.description, 500) : existing.description,
         status: nextStatus,
@@ -866,10 +1003,7 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
             : existing.minSupportedVersion,
         forceUpdate:
           typeof body.forceUpdate === 'boolean' ? body.forceUpdate : existing.forceUpdate,
-        maintenanceMessage:
-          body.maintenanceMessage !== undefined
-            ? sanitizeText(body.maintenanceMessage, 300)
-            : existing.maintenanceMessage,
+        maintenanceMessage: nextMaintenanceMessage,
         admobAppId:
           body.admobAppId !== undefined ? sanitizeText(body.admobAppId, 120) : existing.admobAppId,
         adsEnabled: typeof body.adsEnabled === 'boolean' ? body.adsEnabled : existing.adsEnabled,
@@ -896,6 +1030,39 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       .where(eq(connectedApps.id, id))
       .returning();
 
+    // Cascade package_name & maintenance sync cleanly to per-app sync tables
+    const effectivePkg = nextPackageName || nextPackageOrDomain;
+    if (nextPackageName !== existing.packageName) {
+      await Promise.all([
+        ctx.db
+          .update(appAnnouncements)
+          .set({ packageName: effectivePkg })
+          .where(eq(appAnnouncements.appId, id))
+          .catch(() => {}),
+        ctx.db
+          .update(appRemoteConfigs)
+          .set({ packageName: effectivePkg })
+          .where(eq(appRemoteConfigs.appId, id))
+          .catch(() => {}),
+        ctx.db
+          .update(appHeartbeats)
+          .set({ packageName: effectivePkg })
+          .where(eq(appHeartbeats.appId, id))
+          .catch(() => {}),
+      ]);
+    }
+    if (nextStatus !== existing.status || nextMaintenanceMessage !== existing.maintenanceMessage) {
+      await ctx.db
+        .update(appRemoteConfigs)
+        .set({
+          maintenance: nextStatus === 'maintenance',
+          maintenanceMessage: nextMaintenanceMessage,
+          updatedAt: new Date(),
+        })
+        .where(eq(appRemoteConfigs.appId, id))
+        .catch(() => {});
+    }
+
     await writeAuditLog(ctx.db, {
       actorId: ctx.adminUser!.id,
       actorEmail: ctx.adminUser!.email,
@@ -903,7 +1070,12 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       module: 'apps',
       targetType: 'connected_app',
       targetId: id,
-      details: { name: updated[0].name, status: updated[0].status, version: updated[0].currentVersion },
+      details: {
+        name: updated[0].name,
+        package_name: updated[0].packageName,
+        status: updated[0].status,
+        version: updated[0].currentVersion,
+      },
       ipAddress: ctx.clientIp,
       userAgent: ctx.userAgent,
     });
@@ -1838,57 +2010,69 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     const { app } = auth;
 
     const latencyStart = Date.now();
-    const [flags, ads, latestRelease, publishedNotices, collections] = await Promise.all([
-      ctx.db
-        .select({
-          key: featureFlags.key,
-          name: featureFlags.name,
-          isEnabled: featureFlags.isEnabled,
-          rolloutPercentage: featureFlags.rolloutPercentage,
-          appId: featureFlags.appId,
-        })
-        .from(featureFlags)
-        .where(sql`(${featureFlags.appId} = ${app.id} OR ${featureFlags.appId} IS NULL)`),
-      ctx.db
-        .select({
-          id: adConfigs.id,
-          name: adConfigs.name,
-          network: adConfigs.network,
-          adFormat: adConfigs.adFormat,
-          placement: adConfigs.placement,
-          admobUnitId: adConfigs.admobUnitId,
-          frequencyCap: adConfigs.frequencyCap,
-          visibilityRule: adConfigs.visibilityRule,
-          isEnabled: adConfigs.isEnabled,
-        })
-        .from(adConfigs)
-        .where(and(eq(adConfigs.appId, app.id), eq(adConfigs.isEnabled, true))),
-      ctx.db
-        .select()
-        .from(appReleases)
-        .where(and(eq(appReleases.appId, app.id), eq(appReleases.status, 'active')))
-        .orderBy(desc(appReleases.createdAt))
-        .limit(1),
-      ctx.db
-        .select({
-          id: contentItems.id,
-          title: contentItems.title,
-          slug: contentItems.slug,
-          excerpt: contentItems.excerpt,
-          publishedAt: contentItems.publishedAt,
-        })
-        .from(contentItems)
-        .where(and(eq(contentItems.appId, app.id), eq(contentItems.status, 'published')))
-        .orderBy(desc(contentItems.publishedAt))
-        .limit(10),
-      ctx.db
-        .select({
-          slug: appCollections.slug,
-          name: appCollections.name,
-        })
-        .from(appCollections)
-        .where(eq(appCollections.appId, app.id)),
-    ]);
+    const [flags, ads, latestRelease, publishedNotices, collections, activeAnnouncements, remoteConfigRows] =
+      await Promise.all([
+        ctx.db
+          .select({
+            key: featureFlags.key,
+            name: featureFlags.name,
+            isEnabled: featureFlags.isEnabled,
+            rolloutPercentage: featureFlags.rolloutPercentage,
+            appId: featureFlags.appId,
+          })
+          .from(featureFlags)
+          .where(sql`(${featureFlags.appId} = ${app.id} OR ${featureFlags.appId} IS NULL)`),
+        ctx.db
+          .select({
+            id: adConfigs.id,
+            name: adConfigs.name,
+            network: adConfigs.network,
+            adFormat: adConfigs.adFormat,
+            placement: adConfigs.placement,
+            admobUnitId: adConfigs.admobUnitId,
+            frequencyCap: adConfigs.frequencyCap,
+            visibilityRule: adConfigs.visibilityRule,
+            isEnabled: adConfigs.isEnabled,
+          })
+          .from(adConfigs)
+          .where(and(eq(adConfigs.appId, app.id), eq(adConfigs.isEnabled, true))),
+        ctx.db
+          .select()
+          .from(appReleases)
+          .where(and(eq(appReleases.appId, app.id), eq(appReleases.status, 'active')))
+          .orderBy(desc(appReleases.createdAt))
+          .limit(1),
+        ctx.db
+          .select({
+            id: contentItems.id,
+            title: contentItems.title,
+            slug: contentItems.slug,
+            excerpt: contentItems.excerpt,
+            publishedAt: contentItems.publishedAt,
+          })
+          .from(contentItems)
+          .where(and(eq(contentItems.appId, app.id), eq(contentItems.status, 'published')))
+          .orderBy(desc(contentItems.publishedAt))
+          .limit(10),
+        ctx.db
+          .select({
+            slug: appCollections.slug,
+            name: appCollections.name,
+          })
+          .from(appCollections)
+          .where(eq(appCollections.appId, app.id)),
+        ctx.db
+          .select()
+          .from(appAnnouncements)
+          .where(and(eq(appAnnouncements.appId, app.id), eq(appAnnouncements.active, 1)))
+          .orderBy(desc(appAnnouncements.priority), desc(appAnnouncements.createdAt))
+          .limit(20),
+        ctx.db
+          .select()
+          .from(appRemoteConfigs)
+          .where(eq(appRemoteConfigs.appId, app.id))
+          .limit(1),
+      ]);
 
     const heartbeatLatency = Math.max(1, Date.now() - latencyStart);
     await ctx.db
@@ -1913,17 +2097,29 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       }
     }
 
+    const pkg = app.packageName || app.packageOrDomain;
+    const remotePayload = buildRemoteConfigPayload({
+      app,
+      remoteConfig: remoteConfigRows[0] ?? null,
+      flags,
+      latestRelease: latestRelease[0] ?? null,
+    });
+
     return jsonResponse({
+      package_name: pkg,
       app: {
         appUid: app.appUid,
         slug: app.slug,
         name: app.name,
         platform: app.platform,
+        packageName: app.packageName,
+        package_name: pkg,
         backendNamespace: app.backendNamespace,
         integrationMode: app.integrationMode,
         status: app.status,
-        maintenanceMode: app.status === 'maintenance',
-        maintenanceMessage: app.maintenanceMessage,
+        maintenanceMode: remotePayload.maintenance,
+        killSwitch: remotePayload.kill_switch,
+        maintenanceMessage: remotePayload.maintenance_message,
         currentVersion: latestRelease[0]?.version || app.currentVersion,
         minSupportedVersion: latestRelease[0]?.minSupportedVersion || app.minSupportedVersion,
         forceUpdate: latestRelease[0]?.forceUpdate ?? app.forceUpdate,
@@ -1936,6 +2132,8 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       featureFlags: cleanFlags,
       collections,
       notices: publishedNotices,
+      announcements: activeAnnouncements.map((a) => formatAnnouncementRow(a, pkg)),
+      remote_config: remotePayload,
     });
   });
 

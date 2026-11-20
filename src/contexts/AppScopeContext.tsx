@@ -8,6 +8,7 @@ export interface ConnectedAppRecord {
   slug: string;
   name: string;
   platform: 'android' | 'unity' | 'game' | 'website' | 'ios' | 'api' | string;
+  packageName?: string;
   packageOrDomain: string;
   description: string;
   status: 'connected' | 'disconnected' | 'maintenance' | string;

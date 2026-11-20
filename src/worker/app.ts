@@ -20,6 +20,7 @@ import { registerContentAndCommsRoutes } from './routes/contentAndComms.ts';
 import { registerDevDbFilesAiRoutes } from './routes/devDbFilesAi.ts';
 import { registerMultiAppAndSdkRoutes } from './routes/multiAppAndSdk.ts';
 import { registerOpsAndSecurityRoutes } from './routes/opsAndSecurity.ts';
+import { registerPackageSyncRoutes } from './routes/packageSync.ts';
 import { registerUsersAndRolesRoutes } from './routes/usersAndRoles.ts';
 import type { WorkerContext, WorkerEnv, WorkerExecutionContext } from './types.ts';
 
@@ -31,6 +32,7 @@ function createRouter(): WorkerRouter {
   const router = new WorkerRouter();
   registerAuthAndDashboardRoutes(router);
   registerMultiAppAndSdkRoutes(router);
+  registerPackageSyncRoutes(router);
   registerAppMasterControlRoutes(router);
   registerUsersAndRolesRoutes(router);
   registerContentAndCommsRoutes(router);

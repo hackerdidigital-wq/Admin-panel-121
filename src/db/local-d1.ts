@@ -128,8 +128,18 @@ export function createLocalD1Database(
               (c) => c.name
             )
           );
+          const appCols = new Set(
+            (rawDb.prepare('PRAGMA table_info(connected_apps)').all() as Array<{ name: string }>).map(
+              (c) => c.name
+            )
+          );
           if (adCols.has('app_id') && adCols.has('ecpm_cents') && apiCols.has('app_id')) {
-            currentVersion = migrationFiles.length;
+            const has0004 =
+              appCols.has('package_name') &&
+              existingTables.has('app_announcements') &&
+              existingTables.has('app_remote_configs') &&
+              existingTables.has('app_heartbeats');
+            currentVersion = has0004 ? migrationFiles.length : Math.min(3, migrationFiles.length);
             rawDb.exec(`PRAGMA user_version = ${currentVersion};`);
           }
         }

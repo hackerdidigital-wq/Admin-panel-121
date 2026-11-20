@@ -177,6 +177,7 @@ export const connectedApps = sqliteTable(
     slug: text('slug').notNull().unique(),
     name: text('name').notNull(),
     platform: text('platform').default('android').notNull(), // android | unity | game | website | ios | api
+    packageName: text('package_name').default('').notNull(),
     packageOrDomain: text('package_or_domain').default('').notNull(),
     description: text('description').default('').notNull(),
     status: text('status').default('connected').notNull(), // connected | disconnected | maintenance
@@ -363,6 +364,87 @@ export const userAppPermissions = sqliteTable(
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
   },
   (table) => [uniqueIndex('user_app_perm_unique_idx').on(table.userId, table.appId)]
+);
+
+export const appAnnouncements = sqliteTable(
+  'app_announcements',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id')
+      .references(() => connectedApps.id, { onDelete: 'cascade' })
+      .notNull(),
+    packageName: text('package_name').default('').notNull(),
+    title: text('title').notNull(),
+    body: text('body').notNull(),
+    active: integer('active').default(1).notNull(), // 1 = active, 0 = inactive
+    priority: integer('priority').default(0).notNull(),
+    actionUrl: text('action_url').default('').notNull(),
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }),
+    createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [index('app_announcements_app_idx').on(table.appId)]
+);
+
+export const appRemoteConfigs = sqliteTable(
+  'app_remote_configs',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id')
+      .references(() => connectedApps.id, { onDelete: 'cascade' })
+      .notNull(),
+    packageName: text('package_name').default('').notNull(),
+    maintenance: integer('maintenance', { mode: 'boolean' }).default(false).notNull(),
+    killSwitch: integer('kill_switch', { mode: 'boolean' }).default(false).notNull(),
+    maintenanceMessage: text('maintenance_message')
+      .default('Scheduled maintenance is in progress.')
+      .notNull(),
+    bannerJson: text('banner_json', { mode: 'json' })
+      .$type<{
+        enabled?: boolean;
+        title?: string;
+        message?: string;
+        cta_label?: string;
+        cta_url?: string;
+        image_url?: string;
+      }>()
+      .default(sql`'{}'`)
+      .notNull(),
+    flagsJson: text('flags_json', { mode: 'json' })
+      .$type<Record<string, unknown>>()
+      .default(sql`'{}'`)
+      .notNull(),
+    updatedBy: integer('updated_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [uniqueIndex('app_remote_configs_app_unique_idx').on(table.appId)]
+);
+
+export const appHeartbeats = sqliteTable(
+  'app_heartbeats',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    appId: integer('app_id')
+      .references(() => connectedApps.id, { onDelete: 'cascade' })
+      .notNull(),
+    packageName: text('package_name').default('').notNull(),
+    versionName: text('version_name').default('').notNull(),
+    versionCode: integer('version_code').default(0).notNull(),
+    platform: text('platform').default('android').notNull(),
+    status: text('status').default('online').notNull(),
+    event: text('event').default('heartbeat').notNull(),
+    payloadJson: text('payload_json', { mode: 'json' })
+      .$type<Record<string, unknown>>()
+      .default(sql`'{}'`)
+      .notNull(),
+    ipAddress: text('ip_address').default('').notNull(),
+    userAgent: text('user_agent').default('').notNull(),
+    lastSeenAt: integer('last_seen_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).$defaultFn(nowMs).notNull(),
+  },
+  (table) => [index('app_heartbeats_app_seen_idx').on(table.appId, table.lastSeenAt)]
 );
 
 // 2c. Per-App Dynamic Modules, Isolated Collections & Records

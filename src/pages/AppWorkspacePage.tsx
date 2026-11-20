@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  Activity,
   ArrowLeft,
   Check,
   Copy,
@@ -9,12 +10,14 @@ import {
   FileUp,
   Flag,
   KeyRound,
+  Megaphone,
   Plus,
   RefreshCw,
   RotateCw,
   Search,
   ShieldAlert,
   ShieldCheck,
+  Sliders,
   Terminal,
   Trash2,
   Users,
@@ -91,6 +94,8 @@ interface WorkspaceResponse {
     modulesCount: number;
     filesCount: number;
     activeKeysCount: number;
+    announcementsCount?: number;
+    heartbeatsCount?: number;
     revenueCents: number;
     txCount: number;
     adRevenueCents: number;
@@ -181,6 +186,63 @@ interface WorkspaceResponse {
     severity: string;
     createdAt: string;
   }>;
+  announcements?: Array<{
+    id: number;
+    appId: number;
+    package_name: string;
+    title: string;
+    body: string;
+    active: 0 | 1;
+    priority: number;
+    action_url: string;
+    expires_at: string | null;
+    created_at: string;
+    updated_at: string;
+  }>;
+  remoteConfig?: {
+    appId: number;
+    package_name: string;
+    app_uid: string;
+    app_name: string;
+    platform: string;
+    status: string;
+    maintenance: boolean;
+    kill_switch: boolean;
+    maintenance_message: string;
+    require_sdk_key: boolean;
+    version_gate: {
+      current_version: string;
+      min_supported_version: string;
+      force_update: boolean;
+    };
+    banner: {
+      enabled: boolean;
+      title: string;
+      message: string;
+      cta_label: string;
+      cta_url: string;
+      image_url: string;
+    };
+    ads: {
+      enabled: boolean;
+      admob_app_id: string;
+    };
+    flags: Record<string, string | number | boolean>;
+    updated_at: string;
+  };
+  heartbeats?: Array<{
+    id: number;
+    appId: number;
+    package_name: string;
+    version_name: string;
+    version_code: number;
+    platform: string;
+    status: string;
+    event: string;
+    payload: Record<string, unknown>;
+    ip_address: string;
+    last_seen_at: string;
+  }>;
   integrationSnippets: {
     curl: string;
     website: string;
@@ -190,7 +252,15 @@ interface WorkspaceResponse {
   };
 }
 
-type WorkspaceTab = 'overview' | 'collections' | 'users' | 'config' | 'storage' | 'sdk' | 'backups';
+type WorkspaceTab =
+  | 'overview'
+  | 'announcements'
+  | 'collections'
+  | 'users'
+  | 'config'
+  | 'storage'
+  | 'sdk'
+  | 'backups';
 
 const SCOPE_OPTIONS = [
   'config:read',
@@ -221,6 +291,7 @@ export const AppWorkspacePage: React.FC<{
   // Sync & quick controls
   const [syncingControls, setSyncingControls] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
+  const [editPackageName, setEditPackageName] = useState('');
   const [editVersion, setEditVersion] = useState('');
   const [editMinVersion, setEditMinVersion] = useState('');
   const [editForceUpdate, setEditForceUpdate] = useState(false);
@@ -228,6 +299,30 @@ export const AppWorkspacePage: React.FC<{
   const [editBackendUrl, setEditBackendUrl] = useState('');
   const [editMaintenanceMsg, setEditMaintenanceMsg] = useState('');
   const [savingControls, setSavingControls] = useState(false);
+
+  // Two-way Announcements, Remote Config Flags & Heartbeats
+  const [annTitle, setAnnTitle] = useState('');
+  const [annBody, setAnnBody] = useState('');
+  const [annPriority, setAnnPriority] = useState('10');
+  const [annActionUrl, setAnnActionUrl] = useState('');
+  const [annActive, setAnnActive] = useState(true);
+  const [editingAnnId, setEditingAnnId] = useState<number | null>(null);
+  const [savingAnn, setSavingAnn] = useState(false);
+
+  const [rcMaintenance, setRcMaintenance] = useState(false);
+  const [rcKillSwitch, setRcKillSwitch] = useState(false);
+  const [rcRequireKey, setRcRequireKey] = useState(false);
+  const [rcMaintenanceMsg, setRcMaintenanceMsg] = useState('');
+  const [rcBannerEnabled, setRcBannerEnabled] = useState(false);
+  const [rcBannerTitle, setRcBannerTitle] = useState('');
+  const [rcBannerMessage, setRcBannerMessage] = useState('');
+  const [rcBannerCtaLabel, setRcBannerCtaLabel] = useState('');
+  const [rcBannerCtaUrl, setRcBannerCtaUrl] = useState('');
+  const [rcFlagRows, setRcFlagRows] = useState<Array<{ key: string; value: string }>>([]);
+  const [newRcFlagKey, setNewRcFlagKey] = useState('');
+  const [newRcFlagVal, setNewRcFlagVal] = useState('true');
+  const [savingRemoteConfig, setSavingRemoteConfig] = useState(false);
+  const [sendingTestHeartbeat, setSendingTestHeartbeat] = useState(false);
 
   // Collections & Module Generator
   const [activeCollectionSlug, setActiveCollectionSlug] = useState<string>('');
@@ -294,12 +389,30 @@ export const AppWorkspacePage: React.FC<{
     try {
       const data = await apiRequest<WorkspaceResponse>(`/apps/${appId}/workspace`);
       setWorkspace(data);
+      setEditPackageName(data.app.packageName || data.app.packageOrDomain || '');
       setEditVersion(data.app.currentVersion);
       setEditMinVersion(data.app.minSupportedVersion);
       setEditForceUpdate(Boolean(data.app.forceUpdate));
       setEditAdsEnabled(Boolean(data.app.adsEnabled));
       setEditBackendUrl(data.app.backendBaseUrl || '');
       setEditMaintenanceMsg(data.app.maintenanceMessage || '');
+      if (data.remoteConfig) {
+        setRcMaintenance(Boolean(data.remoteConfig.maintenance));
+        setRcKillSwitch(Boolean(data.remoteConfig.kill_switch));
+        setRcRequireKey(Boolean(data.remoteConfig.require_sdk_key));
+        setRcMaintenanceMsg(data.remoteConfig.maintenance_message || '');
+        setRcBannerEnabled(Boolean(data.remoteConfig.banner?.enabled));
+        setRcBannerTitle(data.remoteConfig.banner?.title || '');
+        setRcBannerMessage(data.remoteConfig.banner?.message || '');
+        setRcBannerCtaLabel(data.remoteConfig.banner?.cta_label || '');
+        setRcBannerCtaUrl(data.remoteConfig.banner?.cta_url || '');
+        setRcFlagRows(
+          Object.entries(data.remoteConfig.flags || {}).map(([key, val]) => ({
+            key,
+            value: String(val),
+          }))
+        );
+      }
       if (data.app.platform === 'unity' || data.app.platform === 'game') setSnippetLang('unity');
       else if (data.app.platform === 'android') setSnippetLang('android');
       else if (data.app.platform === 'ios') setSnippetLang('ios');
@@ -387,6 +500,9 @@ export const AppWorkspacePage: React.FC<{
 
   const { app, stats, modules, collections, keys, endUsers, flags, releases, ads, files, backups, recentEvents } =
     workspace;
+  const announcements = workspace.announcements || [];
+  const heartbeats = workspace.heartbeats || [];
+  const canonicalPackageName = app.packageName || app.packageOrDomain || app.appUid;
   const cap = app.discoveredCapabilities;
   const activeCollection = collections.find((c) => c.slug === activeCollectionSlug) || null;
   const isMaintenance = app.status === 'maintenance';
@@ -449,6 +565,7 @@ export const AppWorkspacePage: React.FC<{
       await apiRequest(`/apps/${app.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
+          packageName: editPackageName.trim(),
           currentVersion: editVersion,
           minSupportedVersion: editMinVersion,
           forceUpdate: editForceUpdate,
@@ -468,6 +585,183 @@ export const AppWorkspacePage: React.FC<{
       });
     } finally {
       setSavingControls(false);
+    }
+  };
+
+  const handleSaveAnnouncement = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!annTitle.trim() || !annBody.trim()) return;
+    setSavingAnn(true);
+    try {
+      const payload = {
+        title: annTitle.trim(),
+        body: annBody.trim(),
+        priority: Number(annPriority) || 0,
+        action_url: annActionUrl.trim(),
+        active: annActive ? 1 : 0,
+      };
+      if (editingAnnId !== null) {
+        await apiRequest(`/apps/${app.id}/announcements/${editingAnnId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+        pushToast({ type: 'success', title: 'Announcement updated' });
+      } else {
+        await apiRequest(`/apps/${app.id}/announcements`, {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        pushToast({ type: 'success', title: 'Announcement published' });
+      }
+      setAnnTitle('');
+      setAnnBody('');
+      setAnnPriority('10');
+      setAnnActionUrl('');
+      setAnnActive(true);
+      setEditingAnnId(null);
+      await loadWorkspace();
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Could not save announcement',
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setSavingAnn(false);
+    }
+  };
+
+  const handleToggleAnnouncementActive = async (annId: number, currentActive: 0 | 1) => {
+    const nextActive = currentActive === 1 ? 0 : 1;
+    try {
+      await apiRequest(`/apps/${app.id}/announcements/${annId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ active: nextActive }),
+      });
+      pushToast({
+        type: 'success',
+        title: nextActive === 1 ? 'Announcement activated (active=1)' : 'Announcement paused (active=0)',
+      });
+      await loadWorkspace();
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Failed to toggle announcement',
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+
+  const handleDeleteAnnouncement = async (annId: number) => {
+    try {
+      await apiRequest(`/apps/${app.id}/announcements/${annId}`, { method: 'DELETE' });
+      if (editingAnnId === annId) {
+        setEditingAnnId(null);
+        setAnnTitle('');
+        setAnnBody('');
+      }
+      pushToast({ type: 'success', title: 'Announcement deleted' });
+      await loadWorkspace();
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Failed to delete announcement',
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+
+  const handleSaveRemoteConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingRemoteConfig(true);
+    try {
+      const parsedFlags: Record<string, string | number | boolean> = {};
+      for (const row of rcFlagRows) {
+        const cleanKey = row.key.trim();
+        if (!cleanKey) continue;
+        const raw = row.value.trim();
+        if (raw === 'true') parsedFlags[cleanKey] = true;
+        else if (raw === 'false') parsedFlags[cleanKey] = false;
+        else if (raw !== '' && !Number.isNaN(Number(raw))) parsedFlags[cleanKey] = Number(raw);
+        else parsedFlags[cleanKey] = raw;
+      }
+
+      await apiRequest(`/apps/${app.id}/remote-config`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          maintenance: rcMaintenance,
+          kill_switch: rcKillSwitch,
+          require_sdk_key: rcRequireKey,
+          maintenance_message: rcMaintenanceMsg.trim(),
+          banner: {
+            enabled: rcBannerEnabled,
+            title: rcBannerTitle.trim(),
+            message: rcBannerMessage.trim(),
+            cta_label: rcBannerCtaLabel.trim(),
+            cta_url: rcBannerCtaUrl.trim(),
+          },
+          flags: parsedFlags,
+        }),
+      });
+      pushToast({
+        type: 'success',
+        title: `Remote config synced for ${canonicalPackageName}`,
+      });
+      await loadWorkspace();
+      await refreshApps();
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Remote config update failed',
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setSavingRemoteConfig(false);
+    }
+  };
+
+  const handleSendTestHeartbeat = async () => {
+    setSendingTestHeartbeat(true);
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Package-Name': canonicalPackageName,
+      };
+      if (testSdkKey.trim()) {
+        headers['X-API-Key'] = testSdkKey.trim();
+        headers['X-App-Id'] = app.appUid;
+      }
+      const res = await fetch('/api/v1/sdk/heartbeat', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          package_name: canonicalPackageName,
+          version_name: app.currentVersion || '1.0.0',
+          version_code: 1,
+          platform: app.platform || 'android',
+          last_seen_at: Date.now(),
+          status: 'online',
+          event: 'admin_probe',
+        }),
+      });
+      const json = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok) {
+        throw new Error(json.error || `HTTP ${res.status}`);
+      }
+      pushToast({
+        type: 'success',
+        title: `Heartbeat recorded for ${canonicalPackageName}`,
+      });
+      await loadWorkspace();
+      await refreshApps();
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Test heartbeat failed',
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setSendingTestHeartbeat(false);
     }
   };
 
@@ -688,25 +982,36 @@ export const AppWorkspacePage: React.FC<{
     }
   };
 
-  const handleRunSdkVerifier = async (endpoint: 'config' | 'data') => {
+  const handleRunSdkVerifier = async (
+    endpoint: 'config' | 'data' | 'announcements' | 'remote-config'
+  ) => {
     const keyToUse = testSdkKey.trim();
-    if (!keyToUse) {
-      pushToast({ type: 'error', title: 'Paste an active plaintext API key to run live SDK check' });
+    if ((endpoint === 'config' || endpoint === 'data') && !keyToUse) {
+      pushToast({ type: 'error', title: 'Paste an active plaintext API key to run this SDK check' });
       return;
     }
     setSdkRunning(true);
     setSdkResult(null);
+    const encodedPkg = encodeURIComponent(canonicalPackageName);
     const targetUrl =
       endpoint === 'config'
-        ? '/api/v1/sdk/config'
-        : `/api/v1/sdk/data/${activeCollectionSlug || collections[0]?.slug || 'leaderboard'}`;
+        ? `/api/v1/sdk/config?package_name=${encodedPkg}`
+        : endpoint === 'announcements'
+          ? `/api/v1/sdk/announcements?package_name=${encodedPkg}&active=1`
+          : endpoint === 'remote-config'
+            ? `/api/v1/sdk/remote-config?package_name=${encodedPkg}`
+            : `/api/v1/sdk/data/${activeCollectionSlug || collections[0]?.slug || 'leaderboard'}`;
     try {
+      const reqHeaders: Record<string, string> = {
+        'X-Package-Name': canonicalPackageName,
+      };
+      if (keyToUse) {
+        reqHeaders['X-App-Id'] = app.appUid;
+        reqHeaders['X-API-Key'] = keyToUse;
+      }
       const res = await fetch(targetUrl, {
         method: 'GET',
-        headers: {
-          'X-App-Id': app.appUid,
-          'X-API-Key': keyToUse,
-        },
+        headers: reqHeaders,
       });
       const text = await res.text();
       let formatted = text;
@@ -729,6 +1034,7 @@ export const AppWorkspacePage: React.FC<{
 
   const tabItems: Array<{ id: WorkspaceTab; label: string }> = [
     { id: 'overview', label: 'Overview & Controls' },
+    { id: 'announcements', label: `Announcements & Remote (${announcements.length})` },
     { id: 'collections', label: `Collections & Backend (${collections.length})` },
     { id: 'users', label: `${isGamePlatform ? 'Players' : 'End-Users'} (${stats.endUsersCount})` },
     { id: 'config', label: `Flags & Releases (${flags.length + releases.length})` },
@@ -755,6 +1061,8 @@ export const AppWorkspacePage: React.FC<{
           </h1>
           <div className="flex flex-wrap items-center gap-2 font-mono text-xs text-slate-500 dark:text-slate-400">
             <span className="capitalize">{app.platform}</span>
+            <span aria-hidden="true">·</span>
+            <span className="font-semibold text-slate-800 dark:text-slate-200">{canonicalPackageName}</span>
             <span aria-hidden="true">·</span>
             <span>{app.appUid}</span>
             <span aria-hidden="true">·</span>
@@ -893,6 +1201,15 @@ export const AppWorkspacePage: React.FC<{
               <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-slate-100">
                 App Runtime Configuration & External Backend Hook
               </h2>
+              <div className="text-xs">
+                <label className="block font-medium">Package Name (package_name) or Domain</label>
+                <input
+                  value={editPackageName}
+                  onChange={(e) => setEditPackageName(e.target.value)}
+                  placeholder="com.cyberking.candymindmatch"
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
               <div className="grid gap-3 sm:grid-cols-2 text-xs">
                 <div>
                   <label className="block font-medium">Current Version</label>
@@ -1004,6 +1321,516 @@ export const AppWorkspacePage: React.FC<{
               </div>
             </section>
           </div>
+        </div>
+      )}
+
+      {/* TAB 1B: PACKAGE-SCOPED ANNOUNCEMENTS, REMOTE CONFIG & HEARTBEATS */}
+      {tab === 'announcements' && (
+        <div className="space-y-6">
+          {/* Package Sync Endpoints Bar */}
+          <section className="rounded-xl border border-slate-200 bg-white p-4 text-xs dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <div>
+                <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  Two-Way Package Sync Endpoints ({canonicalPackageName})
+                </h2>
+                <p className="text-slate-500">
+                  CORS-enabled endpoints keyed by <code className="font-mono">package_name</code> for instant Android &amp; multi-app control.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={sendingTestHeartbeat}
+                onClick={() => void handleSendTestHeartbeat()}
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-slate-900 px-3 font-medium text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-blue-600"
+              >
+                <Activity className="h-3.5 w-3.5" />
+                {sendingTestHeartbeat ? 'Sending...' : 'Send Test Heartbeat'}
+              </button>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-3">
+              {[
+                {
+                  id: 'ep-hb',
+                  label: 'POST Heartbeat (App → Admin)',
+                  value: `${window.location.origin}/api/v1/sdk/heartbeat`,
+                },
+                {
+                  id: 'ep-ann',
+                  label: 'GET Announcements (active=1)',
+                  value: `${window.location.origin}/api/v1/sdk/announcements?package_name=${encodeURIComponent(canonicalPackageName)}&active=1`,
+                },
+                {
+                  id: 'ep-rc',
+                  label: 'GET Remote Config & Flags',
+                  value: `${window.location.origin}/api/v1/sdk/remote-config?package_name=${encodeURIComponent(canonicalPackageName)}`,
+                },
+              ].map((ep) => (
+                <div
+                  key={ep.id}
+                  className="flex min-w-0 items-center justify-between gap-2 overflow-hidden rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-800 dark:bg-slate-950"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] font-medium text-slate-500">{ep.label}</p>
+                    <code className="block truncate font-mono text-[11px] text-slate-800 dark:text-slate-200">
+                      {ep.value}
+                    </code>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void copyText(ep.id, ep.value, ep.label)}
+                    className="shrink-0 rounded border border-slate-200 bg-white p-1.5 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                    aria-label={`Copy ${ep.label}`}
+                  >
+                    {copiedKey === ep.id ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <div className="grid gap-6 lg:grid-cols-12">
+            {/* Announcements CRUD Column */}
+            <section className="min-w-0 space-y-4 rounded-xl border border-slate-200 bg-white p-5 text-xs lg:col-span-6 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Megaphone className="h-4 w-4 text-blue-600" />
+                  <h2 className="font-display text-sm font-semibold">
+                    App Announcements ({announcements.length})
+                  </h2>
+                </div>
+                <span className="font-mono text-[11px] text-slate-500">{canonicalPackageName}</span>
+              </div>
+
+              {hasPerm('apps.manage') && (
+                <form
+                  onSubmit={handleSaveAnnouncement}
+                  className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-950/60"
+                >
+                  {editingAnnId !== null && (
+                    <div className="flex items-center justify-between rounded border border-blue-200 bg-blue-50 px-2.5 py-1 text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300">
+                      <span>Editing announcement #{editingAnnId}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingAnnId(null);
+                          setAnnTitle('');
+                          setAnnBody('');
+                          setAnnPriority('10');
+                          setAnnActionUrl('');
+                          setAnnActive(true);
+                        }}
+                        className="underline"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                  <div className="grid gap-2.5 sm:grid-cols-3">
+                    <div className="sm:col-span-2">
+                      <label htmlFor="ann-title" className="block font-medium">
+                        Announcement Title *
+                      </label>
+                      <input
+                        id="ann-title"
+                        required
+                        value={annTitle}
+                        onChange={(e) => setAnnTitle(e.target.value)}
+                        placeholder="e.g. Weekend Mega Tournament Live!"
+                        className="mt-1 h-9 w-full rounded-lg border border-slate-200 bg-white px-3 dark:border-slate-700 dark:bg-slate-900"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="ann-priority" className="block font-medium">
+                        Priority
+                      </label>
+                      <input
+                        id="ann-priority"
+                        type="number"
+                        value={annPriority}
+                        onChange={(e) => setAnnPriority(e.target.value)}
+                        className="mt-1 h-9 w-full rounded-lg border border-slate-200 bg-white px-3 font-mono dark:border-slate-700 dark:bg-slate-900"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label htmlFor="ann-body" className="block font-medium">
+                      Message Body *
+                    </label>
+                    <textarea
+                      id="ann-body"
+                      required
+                      rows={2}
+                      value={annBody}
+                      onChange={(e) => setAnnBody(e.target.value)}
+                      placeholder="Update to v2.0 for double rewards and new levels."
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-900"
+                    />
+                  </div>
+                  <div className="grid gap-2.5 sm:grid-cols-2">
+                    <div>
+                      <label htmlFor="ann-url" className="block font-medium">
+                        Action URL (optional)
+                      </label>
+                      <input
+                        id="ann-url"
+                        value={annActionUrl}
+                        onChange={(e) => setAnnActionUrl(e.target.value)}
+                        placeholder="https://play.google.com/..."
+                        className="mt-1 h-9 w-full rounded-lg border border-slate-200 bg-white px-3 font-mono dark:border-slate-700 dark:bg-slate-900"
+                      />
+                    </div>
+                    <div className="flex items-end pb-2">
+                      <label className="inline-flex items-center gap-2 font-medium">
+                        <input
+                          type="checkbox"
+                          checked={annActive}
+                          onChange={(e) => setAnnActive(e.target.checked)}
+                        />
+                        <span>Active (active = 1)</span>
+                      </label>
+                    </div>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={savingAnn}
+                    className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-4 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    {savingAnn
+                      ? 'Saving...'
+                      : editingAnnId !== null
+                        ? 'Save Announcement'
+                        : 'Publish Announcement'}
+                  </button>
+                </form>
+              )}
+
+              <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                {announcements.length === 0 ? (
+                  <p className="py-6 text-center text-slate-500">
+                    No announcements created for {canonicalPackageName} yet.
+                  </p>
+                ) : (
+                  announcements.map((ann) => (
+                    <div key={ann.id} className="space-y-1.5 py-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="font-semibold text-slate-900 dark:text-slate-100">{ann.title}</p>
+                            <span
+                              className={`font-mono text-[11px] font-medium ${
+                                ann.active === 1
+                                  ? 'text-emerald-700 dark:text-emerald-400'
+                                  : 'text-slate-400'
+                              }`}
+                            >
+                              active={ann.active} · P{ann.priority}
+                            </span>
+                          </div>
+                          <p className="mt-0.5 text-slate-600 dark:text-slate-300">{ann.body}</p>
+                          {ann.action_url && (
+                            <p className="mt-0.5 truncate font-mono text-[11px] text-blue-600 dark:text-blue-400">
+                              {ann.action_url}
+                            </p>
+                          )}
+                        </div>
+                        {hasPerm('apps.manage') && (
+                          <div className="flex shrink-0 items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => void handleToggleAnnouncementActive(ann.id, ann.active)}
+                              className={`rounded border px-2 py-1 text-[11px] font-medium ${
+                                ann.active === 1
+                                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300'
+                                  : 'border-slate-200 text-slate-600 dark:border-slate-700 dark:text-slate-300'
+                              }`}
+                            >
+                              {ann.active === 1 ? 'Active (1)' : 'Paused (0)'}
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Edit announcement ${ann.title}`}
+                              onClick={() => {
+                                setEditingAnnId(ann.id);
+                                setAnnTitle(ann.title);
+                                setAnnBody(ann.body);
+                                setAnnPriority(String(ann.priority));
+                                setAnnActionUrl(ann.action_url || '');
+                                setAnnActive(ann.active === 1);
+                              }}
+                              className="rounded border border-slate-200 p-1 text-slate-500 hover:text-blue-600 dark:border-slate-700"
+                            >
+                              <Edit3 className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Delete announcement ${ann.title}`}
+                              onClick={() => void handleDeleteAnnouncement(ann.id)}
+                              className="rounded border border-slate-200 p-1 text-slate-500 hover:text-red-600 dark:border-slate-700"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+
+            {/* Remote Config & Kill-Switch Column */}
+            <form
+              onSubmit={handleSaveRemoteConfig}
+              className="min-w-0 space-y-4 rounded-xl border border-slate-200 bg-white p-5 text-xs lg:col-span-6 dark:border-slate-800 dark:bg-slate-900"
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Sliders className="h-4 w-4 text-blue-600" />
+                  <h2 className="font-display text-sm font-semibold">
+                    Remote Config, Kill-Switch &amp; Flags
+                  </h2>
+                </div>
+                {rcKillSwitch && (
+                  <span className="font-mono text-[11px] font-semibold text-red-600 dark:text-red-400">
+                    KILL-SWITCH ACTIVE
+                  </span>
+                )}
+              </div>
+
+              <div className="grid gap-2.5 sm:grid-cols-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-950/60">
+                <label className="inline-flex items-center gap-2 font-medium">
+                  <input
+                    type="checkbox"
+                    checked={rcMaintenance}
+                    onChange={(e) => setRcMaintenance(e.target.checked)}
+                  />
+                  <span>Maintenance Mode</span>
+                </label>
+                <label className="inline-flex items-center gap-2 font-medium text-red-700 dark:text-red-400">
+                  <input
+                    type="checkbox"
+                    checked={rcKillSwitch}
+                    onChange={(e) => setRcKillSwitch(e.target.checked)}
+                  />
+                  <span>Kill-Switch</span>
+                </label>
+                <label className="inline-flex items-center gap-2 font-medium">
+                  <input
+                    type="checkbox"
+                    checked={rcRequireKey}
+                    onChange={(e) => setRcRequireKey(e.target.checked)}
+                  />
+                  <span>Require API Key</span>
+                </label>
+              </div>
+
+              <div>
+                <label htmlFor="rc-maint-msg" className="block font-medium">
+                  Maintenance / Kill-Switch Message
+                </label>
+                <input
+                  id="rc-maint-msg"
+                  value={rcMaintenanceMsg}
+                  onChange={(e) => setRcMaintenanceMsg(e.target.value)}
+                  placeholder="Scheduled maintenance is in progress."
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
+
+              <div className="space-y-2.5 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                <label className="inline-flex items-center gap-2 font-semibold text-slate-900 dark:text-slate-100">
+                  <input
+                    type="checkbox"
+                    checked={rcBannerEnabled}
+                    onChange={(e) => setRcBannerEnabled(e.target.checked)}
+                  />
+                  <span>Enable In-App Remote Banner</span>
+                </label>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <input
+                    value={rcBannerTitle}
+                    onChange={(e) => setRcBannerTitle(e.target.value)}
+                    placeholder="Banner title"
+                    aria-label="Banner Title"
+                    className="h-8 rounded-md border border-slate-200 px-2.5 dark:border-slate-700 dark:bg-slate-950"
+                  />
+                  <input
+                    value={rcBannerCtaLabel}
+                    onChange={(e) => setRcBannerCtaLabel(e.target.value)}
+                    placeholder="CTA Label (e.g. Play Now)"
+                    aria-label="Banner CTA Label"
+                    className="h-8 rounded-md border border-slate-200 px-2.5 dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
+                <input
+                  value={rcBannerMessage}
+                  onChange={(e) => setRcBannerMessage(e.target.value)}
+                  placeholder="Banner body message"
+                  aria-label="Banner Message"
+                  className="h-8 w-full rounded-md border border-slate-200 px-2.5 dark:border-slate-700 dark:bg-slate-950"
+                />
+                <input
+                  value={rcBannerCtaUrl}
+                  onChange={(e) => setRcBannerCtaUrl(e.target.value)}
+                  placeholder="Banner CTA URL (https://...)"
+                  aria-label="Banner CTA URL"
+                  className="h-8 w-full rounded-md border border-slate-200 px-2.5 font-mono dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <p className="font-semibold text-slate-900 dark:text-slate-100">
+                  Structured Remote Flags (key / value)
+                </p>
+                {rcFlagRows.length > 0 && (
+                  <div className="space-y-1.5">
+                    {rcFlagRows.map((row, idx) => (
+                      <div key={`${row.key}-${idx}`} className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+                        <input
+                          value={row.key}
+                          onChange={(e) =>
+                            setRcFlagRows((prev) =>
+                              prev.map((item, i) => (i === idx ? { ...item, key: e.target.value } : item))
+                            )
+                          }
+                          aria-label={`Remote flag key ${idx}`}
+                          className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 px-2.5 font-mono dark:border-slate-700 dark:bg-slate-950"
+                        />
+                        <input
+                          value={row.value}
+                          onChange={(e) =>
+                            setRcFlagRows((prev) =>
+                              prev.map((item, i) => (i === idx ? { ...item, value: e.target.value } : item))
+                            )
+                          }
+                          aria-label={`Remote flag value ${idx}`}
+                          className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 px-2.5 font-mono dark:border-slate-700 dark:bg-slate-950"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setRcFlagRows((prev) => prev.filter((_, i) => i !== idx))}
+                          className="shrink-0 rounded border border-slate-200 p-1.5 text-slate-500 hover:text-red-600 dark:border-slate-700"
+                          aria-label={`Remove flag ${row.key}`}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    value={newRcFlagKey}
+                    onChange={(e) => setNewRcFlagKey(e.target.value)}
+                    placeholder="flag_key (e.g. daily_bonus_enabled)"
+                    aria-label="New remote flag key"
+                    className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 px-2.5 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                  <input
+                    value={newRcFlagVal}
+                    onChange={(e) => setNewRcFlagVal(e.target.value)}
+                    placeholder="true / 500 / promo"
+                    aria-label="New remote flag value"
+                    className="h-8 min-w-0 w-24 rounded-md border border-slate-200 px-2.5 font-mono sm:w-32 dark:border-slate-700 dark:bg-slate-950"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const k = newRcFlagKey.trim().replace(/[^a-zA-Z0-9_.-]+/g, '_');
+                      if (!k) return;
+                      setRcFlagRows((prev) => [
+                        ...prev.filter((r) => r.key !== k),
+                        { key: k, value: newRcFlagVal.trim() || 'true' },
+                      ]);
+                      setNewRcFlagKey('');
+                    }}
+                    className="h-8 rounded-md border border-slate-200 px-3 font-medium hover:bg-slate-50 dark:border-slate-700"
+                  >
+                    Add Flag
+                  </button>
+                </div>
+              </div>
+
+              {hasPerm('apps.manage') && (
+                <button
+                  type="submit"
+                  disabled={savingRemoteConfig}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-4 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {savingRemoteConfig ? 'Saving Remote Config...' : 'Save Remote Config'}
+                </button>
+              )}
+            </form>
+          </div>
+
+          {/* Live App Heartbeats Table */}
+          <section className="rounded-xl border border-slate-200 bg-white p-5 text-xs dark:border-slate-800 dark:bg-slate-900">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="font-display text-sm font-semibold">
+                  Connected Client Heartbeats ({heartbeats.length})
+                </h2>
+                <p className="text-slate-500">
+                  Last app heartbeat:{' '}
+                  <span className="font-mono">
+                    {app.lastHeartbeatAt ? new Date(app.lastHeartbeatAt).toLocaleString() : 'Never'}
+                  </span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadWorkspace()}
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 px-3 font-medium hover:bg-slate-50 dark:border-slate-700"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Refresh
+              </button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-200 text-slate-500 dark:border-slate-800">
+                    <th className="py-2 pr-3 font-medium">Package Name</th>
+                    <th className="py-2 pr-3 font-medium">Version</th>
+                    <th className="py-2 pr-3 font-medium">Platform</th>
+                    <th className="py-2 pr-3 font-medium">Status / Event</th>
+                    <th className="py-2 pr-3 font-medium">Client IP</th>
+                    <th className="py-2 text-right font-medium">Last Seen</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {heartbeats.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-8 text-center text-slate-500">
+                        No heartbeats recorded yet for {canonicalPackageName}. Click &ldquo;Send Test Heartbeat&rdquo; or connect your app.
+                      </td>
+                    </tr>
+                  ) : (
+                    heartbeats.map((hb) => (
+                      <tr key={hb.id}>
+                        <td className="py-2.5 pr-3 font-mono font-medium text-slate-900 dark:text-slate-100">
+                          {hb.package_name}
+                        </td>
+                        <td className="py-2.5 pr-3 font-mono tabular-nums">
+                          v{hb.version_name || '-'} ({hb.version_code})
+                        </td>
+                        <td className="py-2.5 pr-3 capitalize">{hb.platform}</td>
+                        <td className="py-2.5 pr-3 font-mono">
+                          <span className="text-emerald-700 dark:text-emerald-400">{hb.status}</span> · {hb.event}
+                        </td>
+                        <td className="py-2.5 pr-3 font-mono text-slate-500">{hb.ip_address || '-'}</td>
+                        <td className="py-2.5 text-right font-mono tabular-nums text-slate-500">
+                          {new Date(hb.last_seen_at).toLocaleString()}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
         </div>
       )}
 
@@ -1993,8 +2820,25 @@ export const AppWorkspacePage: React.FC<{
                 <button
                   type="button"
                   disabled={sdkRunning}
+                  onClick={() => void handleRunSdkVerifier('announcements')}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 font-medium text-white hover:bg-blue-700"
+                >
+                  <Zap className="h-3.5 w-3.5" />
+                  Test GET /sdk/announcements
+                </button>
+                <button
+                  type="button"
+                  disabled={sdkRunning}
+                  onClick={() => void handleRunSdkVerifier('remote-config')}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 px-3.5 font-medium hover:bg-slate-50 dark:border-slate-700"
+                >
+                  Test GET /sdk/remote-config
+                </button>
+                <button
+                  type="button"
+                  disabled={sdkRunning}
                   onClick={() => void handleRunSdkVerifier('config')}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 font-medium text-white hover:bg-slate-800 dark:bg-blue-600"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 font-medium text-white hover:bg-slate-800 dark:bg-slate-800"
                 >
                   <Zap className="h-3.5 w-3.5" />
                   Test GET /sdk/config

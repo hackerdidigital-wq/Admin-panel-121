@@ -19,6 +19,9 @@ const REQUIRED_TABLES = [
   'webhooks',
   'webhook_deliveries',
   'user_app_permissions',
+  'app_announcements',
+  'app_remote_configs',
+  'app_heartbeats',
   'app_modules',
   'app_collections',
   'app_records',
@@ -185,6 +188,7 @@ const REMAINING_SCHEMA_DDL: string[] = [
     slug TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     platform TEXT NOT NULL DEFAULT 'android',
+    package_name TEXT NOT NULL DEFAULT '',
     package_or_domain TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'connected',
@@ -206,6 +210,7 @@ const REMAINING_SCHEMA_DDL: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS connected_apps_status_idx ON connected_apps(status)`,
   `CREATE INDEX IF NOT EXISTS connected_apps_platform_idx ON connected_apps(platform)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS connected_apps_package_name_unique_idx ON connected_apps(lower(package_name)) WHERE package_name != ''`,
   `CREATE TABLE IF NOT EXISTS app_api_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     app_id INTEGER NOT NULL REFERENCES connected_apps(id) ON DELETE CASCADE,
@@ -297,6 +302,54 @@ const REMAINING_SCHEMA_DDL: string[] = [
     updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS user_app_perm_unique_idx ON user_app_permissions(user_id, app_id)`,
+  `CREATE TABLE IF NOT EXISTS app_announcements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id INTEGER NOT NULL REFERENCES connected_apps(id) ON DELETE CASCADE,
+    package_name TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    priority INTEGER NOT NULL DEFAULT 0,
+    action_url TEXT NOT NULL DEFAULT '',
+    expires_at INTEGER,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+    updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
+  )`,
+  `CREATE INDEX IF NOT EXISTS app_announcements_pkg_active_idx ON app_announcements(lower(package_name), active, priority)`,
+  `CREATE INDEX IF NOT EXISTS app_announcements_app_idx ON app_announcements(app_id)`,
+  `CREATE TABLE IF NOT EXISTS app_remote_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id INTEGER NOT NULL REFERENCES connected_apps(id) ON DELETE CASCADE,
+    package_name TEXT NOT NULL DEFAULT '',
+    maintenance INTEGER NOT NULL DEFAULT 0,
+    kill_switch INTEGER NOT NULL DEFAULT 0,
+    maintenance_message TEXT NOT NULL DEFAULT 'Scheduled maintenance is in progress.',
+    banner_json TEXT NOT NULL DEFAULT '{}',
+    flags_json TEXT NOT NULL DEFAULT '{}',
+    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+    updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS app_remote_configs_app_unique_idx ON app_remote_configs(app_id)`,
+  `CREATE INDEX IF NOT EXISTS app_remote_configs_pkg_idx ON app_remote_configs(lower(package_name))`,
+  `CREATE TABLE IF NOT EXISTS app_heartbeats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id INTEGER NOT NULL REFERENCES connected_apps(id) ON DELETE CASCADE,
+    package_name TEXT NOT NULL DEFAULT '',
+    version_name TEXT NOT NULL DEFAULT '',
+    version_code INTEGER NOT NULL DEFAULT 0,
+    platform TEXT NOT NULL DEFAULT 'android',
+    status TEXT NOT NULL DEFAULT 'online',
+    event TEXT NOT NULL DEFAULT 'heartbeat',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    ip_address TEXT NOT NULL DEFAULT '',
+    user_agent TEXT NOT NULL DEFAULT '',
+    last_seen_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+    created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
+  )`,
+  `CREATE INDEX IF NOT EXISTS app_heartbeats_pkg_seen_idx ON app_heartbeats(lower(package_name), last_seen_at)`,
+  `CREATE INDEX IF NOT EXISTS app_heartbeats_app_seen_idx ON app_heartbeats(app_id, last_seen_at)`,
   `CREATE TABLE IF NOT EXISTS app_modules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     app_id INTEGER NOT NULL REFERENCES connected_apps(id) ON DELETE CASCADE,
@@ -895,6 +948,13 @@ const MULTI_APP_COLUMN_UPGRADES: Array<{
     column: 'sync_status',
     alterSql: "ALTER TABLE connected_apps ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'unverified'",
   },
+  {
+    table: 'connected_apps',
+    column: 'package_name',
+    alterSql: "ALTER TABLE connected_apps ADD COLUMN package_name TEXT NOT NULL DEFAULT ''",
+    indexSql:
+      "CREATE UNIQUE INDEX IF NOT EXISTS connected_apps_package_name_unique_idx ON connected_apps(lower(package_name)) WHERE package_name != ''",
+  },
 ];
 
 async function ensureMultiAppColumnsAndIndexes(d1: D1Database): Promise<void> {
@@ -949,11 +1009,28 @@ async function runSchemaBootstrap(d1: D1Database): Promise<void> {
       apiCols.has('app_id') &&
       fileCols.has('app_id') &&
       appCols.has('backend_namespace') &&
-      appCols.has('sync_status')
+      appCols.has('sync_status') &&
+      appCols.has('package_name')
     ) {
       return;
     }
     await ensureMultiAppColumnsAndIndexes(d1);
+    await d1
+      .prepare(
+        `UPDATE connected_apps
+         SET package_name = lower(trim(package_or_domain))
+         WHERE package_name = ''
+           AND trim(package_or_domain) != ''
+           AND trim(package_or_domain) NOT LIKE '%://%'
+           AND instr(trim(package_or_domain), '.') > 0
+           AND id = (
+             SELECT MIN(c2.id)
+             FROM connected_apps c2
+             WHERE lower(trim(c2.package_or_domain)) = lower(trim(connected_apps.package_or_domain))
+           )`
+      )
+      .run()
+      .catch(() => {});
     return;
   }
 

@@ -51,7 +51,7 @@ async function apiCall(
   return handleApiRequest(req, env);
 }
 
-test('D1 SQLite migrations initialize all 36 relational tables, foreign keys, and indexes', async () => {
+test('D1 SQLite migrations initialize all 39 relational tables, foreign keys, and indexes', async () => {
   const { d1, raw } = createLocalD1Database(':memory:');
   try {
     const tables = await d1
@@ -59,7 +59,7 @@ test('D1 SQLite migrations initialize all 36 relational tables, foreign keys, an
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
       )
       .all<{ name: string }>();
-    assert.equal(tables.results.length, 36);
+    assert.equal(tables.results.length, 39);
 
     const indexes = await d1
       .prepare(

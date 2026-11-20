@@ -1,12 +1,15 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
 import {
   adConfigs,
+  appAnnouncements,
   appApiKeys,
   appCollections,
   appEvents,
+  appHeartbeats,
   appModules,
   appRecords,
   appReleases,
+  appRemoteConfigs,
   appUsers,
   backups,
   connectedApps,
@@ -31,6 +34,7 @@ import { errorResponse, jsonResponse, readJsonBody } from '../http.ts';
 import type { WorkerRouter } from '../router.ts';
 import type { WorkerContext } from '../types.ts';
 import { authenticateSdkRequest, dispatchWebhooksForEvent } from './multiAppAndSdk.ts';
+import { buildRemoteConfigPayload, formatAnnouncementRow } from './packageSync.ts';
 
 function isSafePublicUrl(rawUrl: string): boolean {
   try {
@@ -227,6 +231,7 @@ export function registerAppMasterControlRoutes(router: WorkerRouter): void {
       appUid: 'app_generated_on_connect',
       apiKey: 'aegis_live_ISSUED_ON_CONNECT',
       platform: report.platform,
+      packageName: sanitizeText(body.packageOrDomain, 180) || 'com.cyberking.candymindmatch',
       collections: report.proposedCollections.map((c) => ({ slug: c.slug, name: c.name })),
     });
 
@@ -257,6 +262,9 @@ export function registerAppMasterControlRoutes(router: WorkerRouter): void {
       backupsList,
       recentEventsList,
       txSummary,
+      announcementsList,
+      remoteConfigRows,
+      heartbeatsList,
     ] = await Promise.all([
       ctx.db.select().from(appModules).where(eq(appModules.appId, appId)).orderBy(desc(appModules.updatedAt)),
       ctx.db.select().from(appCollections).where(eq(appCollections.appId, appId)).orderBy(appCollections.name),
@@ -337,6 +345,18 @@ export function registerAppMasterControlRoutes(router: WorkerRouter): void {
         })
         .from(transactions)
         .where(eq(transactions.appId, appId)),
+      ctx.db
+        .select()
+        .from(appAnnouncements)
+        .where(eq(appAnnouncements.appId, appId))
+        .orderBy(desc(appAnnouncements.priority), desc(appAnnouncements.createdAt)),
+      ctx.db.select().from(appRemoteConfigs).where(eq(appRemoteConfigs.appId, appId)).limit(1),
+      ctx.db
+        .select()
+        .from(appHeartbeats)
+        .where(eq(appHeartbeats.appId, appId))
+        .orderBy(desc(appHeartbeats.lastSeenAt), desc(appHeartbeats.id))
+        .limit(40),
     ]);
 
     const recCountMap = new Map(recordCounts.map((r) => [r.collectionId, Number(r.count)]));
@@ -345,6 +365,7 @@ export function registerAppMasterControlRoutes(router: WorkerRouter): void {
       recordCount: recCountMap.get(c.id) ?? 0,
     }));
 
+    const pkg = app.packageName || app.packageOrDomain;
     const namespace = app.backendNamespace || buildBackendNamespace(app.slug, app.appUid);
     const snippets = generatePlatformIntegrationSnippets({
       apiBaseUrl: new URL(ctx.request.url).origin,
@@ -353,7 +374,20 @@ export function registerAppMasterControlRoutes(router: WorkerRouter): void {
         ? `${keysList.find((k) => k.isActive)!.keyPrefix}...`
         : 'aegis_live_YOUR_API_KEY',
       platform: app.platform,
+      packageName: pkg,
       collections: enrichedCollections.map((c) => ({ slug: c.slug, name: c.name })),
+    });
+
+    const remoteConfig = buildRemoteConfigPayload({
+      app,
+      remoteConfig: remoteConfigRows[0] ?? null,
+      flags: flagsList.map((f) => ({
+        key: f.key,
+        isEnabled: f.isEnabled,
+        rolloutPercentage: f.rolloutPercentage,
+        appId: f.appId,
+      })),
+      latestRelease: releasesList[0] ?? null,
     });
 
     return jsonResponse({
@@ -371,6 +405,8 @@ export function registerAppMasterControlRoutes(router: WorkerRouter): void {
         modulesCount: modulesList.length,
         filesCount: filesList.length,
         activeKeysCount: keysList.filter((k) => k.isActive).length,
+        announcementsCount: announcementsList.length,
+        heartbeatsCount: heartbeatsList.length,
         revenueCents: Number(txSummary[0]?.revenueCents ?? 0),
         txCount: Number(txSummary[0]?.txCount ?? 0),
         adRevenueCents: adsList.reduce((s, a) => s + a.revenueCents, 0),
@@ -389,6 +425,21 @@ export function registerAppMasterControlRoutes(router: WorkerRouter): void {
       webhooks: webhooksList,
       backups: backupsList,
       recentEvents: recentEventsList,
+      announcements: announcementsList.map((a) => formatAnnouncementRow(a, pkg)),
+      remoteConfig,
+      heartbeats: heartbeatsList.map((hb) => ({
+        id: hb.id,
+        appId: hb.appId,
+        package_name: hb.packageName,
+        version_name: hb.versionName,
+        version_code: hb.versionCode,
+        platform: hb.platform,
+        status: hb.status,
+        event: hb.event,
+        payload: hb.payloadJson,
+        ip_address: hb.ipAddress,
+        last_seen_at: new Date(hb.lastSeenAt).toISOString(),
+      })),
       integrationSnippets: snippets,
     });
   });

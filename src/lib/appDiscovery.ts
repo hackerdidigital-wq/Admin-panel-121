@@ -718,6 +718,7 @@ export function generatePlatformIntegrationSnippets(params: {
   appUid: string;
   apiKey: string;
   platform: string;
+  packageName?: string;
   collections?: Array<{ slug: string; name: string }>;
 }): {
   curl: string;
@@ -729,74 +730,114 @@ export function generatePlatformIntegrationSnippets(params: {
   const base = params.apiBaseUrl.replace(/\/+$/, '');
   const uid = params.appUid || 'app_your_uid';
   const key = params.apiKey || 'aegis_live_YOUR_API_KEY';
+  const pkg = params.packageName || 'com.cyberking.candymindmatch';
   const sampleSlug = params.collections?.[0]?.slug || 'leaderboard';
 
-  const curl = `# 1. Fetch isolated app config, flags, releases & ads
-curl -s "${base}/api/v1/sdk/config" \\
-  -H "X-App-Id: ${uid}" \\
-  -H "X-API-Key: ${key}"
+  const curl = `# 1. Send App -> Admin Panel heartbeat (by package_name)
+curl -s -X POST "${base}/api/v1/sdk/heartbeat" \\
+  -H "Content-Type: application/json" \\
+  -H "X-API-Key: ${key}" \\
+  -d '{"package_name":"${pkg}","version_name":"1.0.0","version_code":1,"platform":"${params.platform || 'android'}","status":"online","event":"app_open"}'
 
-# 2. Write a record to isolated collection "${sampleSlug}"
+# 2. Fetch active announcements for package_name
+curl -s "${base}/api/v1/sdk/announcements?package_name=${pkg}&active=1"
+
+# 3. Fetch remote config & control flags for package_name
+curl -s "${base}/api/v1/sdk/remote-config?package_name=${pkg}"
+
+# 4. Write a record to isolated collection "${sampleSlug}"
 curl -s -X POST "${base}/api/v1/sdk/data/${sampleSlug}" \\
   -H "Content-Type: application/json" \\
   -H "X-App-Id: ${uid}" \\
+  -H "X-Package-Name: ${pkg}" \\
   -H "X-API-Key: ${key}" \\
   -d '{"data":{"name":"Sample Entry","active":true}}'`;
 
-  const website = `// Aegis Web / TypeScript SDK Client (${uid})
+  const website = `// Aegis Web / TypeScript SDK Client (${uid} · ${pkg})
 const AEGIS_HEADERS = {
   "Content-Type": "application/json",
   "X-App-Id": "${uid}",
+  "X-Package-Name": "${pkg}",
   "X-API-Key": "${key}",
 };
 
-export async function fetchAegisConfig() {
-  const res = await fetch("${base}/api/v1/sdk/config", { headers: AEGIS_HEADERS });
-  if (!res.ok) throw new Error(\`Aegis config HTTP \${res.status}\`);
+export async function sendHeartbeat(versionName = "1.0.0", versionCode = 1) {
+  const res = await fetch("${base}/api/v1/sdk/heartbeat", {
+    method: "POST",
+    headers: AEGIS_HEADERS,
+    body: JSON.stringify({
+      package_name: "${pkg}",
+      version_name: versionName,
+      version_code: versionCode,
+      platform: "${params.platform || 'website'}",
+      last_seen_at: Date.now(),
+      status: "online",
+      event: "session_ping",
+    }),
+  });
   return res.json();
 }
 
-export async function syncEndUser(externalUserId: string, email?: string) {
-  const res = await fetch("${base}/api/v1/sdk/users/sync", {
-    method: "POST",
-    headers: AEGIS_HEADERS,
-    body: JSON.stringify({ externalUserId, email, appVersion: "1.0.0" }),
-  });
-  return res.json(); // Returns HTTP 403 if user is banned in Aegis
+export async function fetchRemoteConfig() {
+  const res = await fetch("${base}/api/v1/sdk/remote-config?package_name=${encodeURIComponent(pkg)}");
+  if (!res.ok) throw new Error(\`Aegis remote config HTTP \${res.status}\`);
+  return res.json();
 }
 
-export async function saveCollectionRecord(data: Record<string, unknown>) {
-  const res = await fetch("${base}/api/v1/sdk/data/${sampleSlug}", {
-    method: "POST",
-    headers: AEGIS_HEADERS,
-    body: JSON.stringify({ data }),
-  });
+export async function fetchActiveAnnouncements() {
+  const res = await fetch("${base}/api/v1/sdk/announcements?package_name=${encodeURIComponent(pkg)}&active=1");
+  return res.json();
+}
+
+export async function fetchCollectionRecords() {
+  const res = await fetch("${base}/api/v1/sdk/data/${sampleSlug}", { headers: AEGIS_HEADERS });
   return res.json();
 }`;
 
-  const android = `// Android Kotlin + OkHttp Integration (${uid})
+  const android = `// Android Kotlin + OkHttp Two-Way Package Sync (${pkg})
 val client = OkHttpClient()
-val configReq = Request.Builder()
-  .url("${base}/api/v1/sdk/config")
-  .addHeader("X-App-Id", "${uid}")
+val mediaType = "application/json; charset=utf-8".toMediaType()
+val packageName = "${pkg}"
+
+// 1. App -> Admin Panel: Register / Heartbeat app state
+val heartbeatJson = """
+  {
+    "package_name": "$packageName",
+    "version_name": BuildConfig.VERSION_NAME,
+    "version_code": BuildConfig.VERSION_CODE,
+    "platform": "android",
+    "last_seen_at": \${System.currentTimeMillis()},
+    "status": "online",
+    "event": "app_open"
+  }
+""".trimIndent()
+val heartbeatReq = Request.Builder()
+  .url("${base}/api/v1/sdk/heartbeat")
+  .post(heartbeatJson.toRequestBody(mediaType))
+  .addHeader("X-Package-Name", packageName)
   .addHeader("X-API-Key", "${key}")
   .build()
+client.newCall(heartbeatReq).execute().close()
 
-client.newCall(configReq).execute().use { resp ->
+// 2. Admin Panel -> App: Fetch Remote Config / Kill-Switch / Maintenance Flags
+val remoteReq = Request.Builder()
+  .url("${base}/api/v1/sdk/remote-config?package_name=$packageName")
+  .build()
+client.newCall(remoteReq).execute().use { resp ->
   if (resp.isSuccessful) {
-    val json = resp.body?.string() // Apply maintenance, forceUpdate, featureFlags, ads
+    val configJson = resp.body?.string() // maintenance, kill_switch, banner, flags
   }
 }
 
-// Write to isolated backend collection "${sampleSlug}"
-val mediaType = "application/json; charset=utf-8".toMediaType()
-val recordBody = """{"data":{"name":"Android Client","active":true}}""".toRequestBody(mediaType)
-val dataReq = Request.Builder()
-  .url("${base}/api/v1/sdk/data/${sampleSlug}")
-  .post(recordBody)
-  .addHeader("X-App-Id", "${uid}")
-  .addHeader("X-API-Key", "${key}")
-  .build()`;
+// 3. Admin Panel -> App: Fetch Active Announcements
+val annReq = Request.Builder()
+  .url("${base}/api/v1/sdk/announcements?package_name=$packageName&active=1")
+  .build()
+client.newCall(annReq).execute().use { resp ->
+  if (resp.isSuccessful) {
+    val announcementsJson = resp.body?.string() // active=1 sorted by priority DESC
+  }
+}`;
 
   const unity = `// Unity C# SDK Integration (${uid})
 using System.Text;
