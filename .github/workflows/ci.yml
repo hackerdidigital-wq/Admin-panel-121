@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies cleanly
         run: npm ci
 
-      - name: Verify D1 SQLite migrations (36 tables, FKs, indexes)
+      - name: Verify D1 SQLite migrations (39 tables, FKs, indexes)
         run: |
           node --input-type=module -e "
             import fs from 'node:fs';
@@ -41,8 +41,21 @@ jobs:
             const tables = db.prepare(\"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'\").all();
             const indexes = db.prepare(\"SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'\").all();
             const fkViolations = db.prepare('PRAGMA foreign_key_check').all();
+            const tableNames = new Set(tables.map((t) => t.name));
+            const indexNames = new Set(indexes.map((i) => i.name));
+            const requiredTables = ['connected_apps', 'app_announcements', 'app_remote_configs', 'app_heartbeats'];
+            const missingTables = requiredTables.filter((t) => !tableNames.has(t));
             console.log('Verified D1 migrations:', files.length, 'tables:', tables.length, 'indexes:', indexes.length);
-            if (tables.length !== 36 || indexes.length < 24 || fkViolations.length > 0) process.exit(1);
+            if (
+              tables.length !== 39 ||
+              indexes.length < 24 ||
+              fkViolations.length > 0 ||
+              missingTables.length > 0 ||
+              !indexNames.has('connected_apps_package_name_unique_idx')
+            ) {
+              console.error({ tableCount: tables.length, indexCount: indexes.length, fkViolations, missingTables });
+              process.exit(1);
+            }
           "
 
       - name: TypeScript typecheck
