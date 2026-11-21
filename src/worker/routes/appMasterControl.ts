@@ -27,6 +27,12 @@ import {
   type IntegrationMode,
 } from '../../lib/appDiscovery.ts';
 import { toCsv } from '../../lib/csv.ts';
+import {
+  extractAppVersionCode,
+  extractConnectionConfig,
+  extractFirebaseMetadata,
+  extractHeartbeatDeviceInfo,
+} from '../../lib/packageSync.ts';
 import { computeSha256, generateUid, sanitizeText } from '../../lib/security.ts';
 import { writeAuditLog } from '../audit.ts';
 import { requireAppAccess, requirePermission } from '../auth.ts';
@@ -231,7 +237,7 @@ export function registerAppMasterControlRoutes(router: WorkerRouter): void {
       appUid: 'app_generated_on_connect',
       apiKey: 'aegis_live_ISSUED_ON_CONNECT',
       platform: report.platform,
-      packageName: sanitizeText(body.packageOrDomain, 180) || 'com.cyberking.candymindmatch',
+      packageName: sanitizeText(body.packageOrDomain, 180) || 'com.company.myapp',
       collections: report.proposedCollections.map((c) => ({ slug: c.slug, name: c.name })),
     });
 
@@ -390,12 +396,24 @@ export function registerAppMasterControlRoutes(router: WorkerRouter): void {
       latestRelease: releasesList[0] ?? null,
     });
 
+    const appFb = extractFirebaseMetadata(app.settingsJson);
+    const versionCode = extractAppVersionCode(app.settingsJson);
+    const connectionConfig = extractConnectionConfig(app.settingsJson, {
+      integrationMode: app.integrationMode,
+      backendBaseUrl: app.backendBaseUrl,
+    });
     return jsonResponse({
       app: {
         ...app,
+        versionCode,
+        connectionConfig,
         backendNamespace: namespace,
         webhookSecret: undefined,
         hasWebhookSecret: Boolean(app.webhookSecret),
+        firebaseProjectId: appFb.firebase_project_id,
+        firebaseAppId: appFb.firebase_app_id,
+        firebaseProjectNumber: appFb.firebase_project_number,
+        firebaseStorageBucket: appFb.firebase_storage_bucket,
       },
       stats: {
         endUsersCount: endUsersList.length,
@@ -427,19 +445,25 @@ export function registerAppMasterControlRoutes(router: WorkerRouter): void {
       recentEvents: recentEventsList,
       announcements: announcementsList.map((a) => formatAnnouncementRow(a, pkg)),
       remoteConfig,
-      heartbeats: heartbeatsList.map((hb) => ({
-        id: hb.id,
-        appId: hb.appId,
-        package_name: hb.packageName,
-        version_name: hb.versionName,
-        version_code: hb.versionCode,
-        platform: hb.platform,
-        status: hb.status,
-        event: hb.event,
-        payload: hb.payloadJson,
-        ip_address: hb.ipAddress,
-        last_seen_at: new Date(hb.lastSeenAt).toISOString(),
-      })),
+      heartbeats: heartbeatsList.map((hb) => {
+        const dev = extractHeartbeatDeviceInfo(hb.payloadJson, hb.userAgent);
+        return {
+          id: hb.id,
+          appId: hb.appId,
+          package_name: hb.packageName,
+          version_name: hb.versionName,
+          version_code: hb.versionCode,
+          platform: hb.platform,
+          status: hb.status,
+          event: hb.event,
+          device_model: dev.device_model,
+          os_version: dev.os_version,
+          user_agent: hb.userAgent,
+          payload: hb.payloadJson,
+          ip_address: hb.ipAddress,
+          last_seen_at: new Date(hb.lastSeenAt).toISOString(),
+        };
+      }),
       integrationSnippets: snippets,
     });
   });

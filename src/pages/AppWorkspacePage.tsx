@@ -212,6 +212,7 @@ interface WorkspaceResponse {
     require_sdk_key: boolean;
     version_gate: {
       current_version: string;
+      version_code?: number;
       min_supported_version: string;
       force_update: boolean;
     };
@@ -227,6 +228,13 @@ interface WorkspaceResponse {
       enabled: boolean;
       admob_app_id: string;
     };
+    firebase?: {
+      configured: boolean;
+      project_id: string;
+      app_id: string;
+      project_number?: string;
+      storage_bucket?: string;
+    };
     flags: Record<string, string | number | boolean>;
     updated_at: string;
   };
@@ -239,6 +247,9 @@ interface WorkspaceResponse {
     platform: string;
     status: string;
     event: string;
+    device_model?: string;
+    os_version?: string;
+    user_agent?: string;
     payload: Record<string, unknown>;
     ip_address: string;
     last_seen_at: string;
@@ -293,9 +304,15 @@ export const AppWorkspacePage: React.FC<{
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
   const [editPackageName, setEditPackageName] = useState('');
   const [editVersion, setEditVersion] = useState('');
+  const [editVersionCode, setEditVersionCode] = useState('1');
   const [editMinVersion, setEditMinVersion] = useState('');
   const [editForceUpdate, setEditForceUpdate] = useState(false);
   const [editAdsEnabled, setEditAdsEnabled] = useState(true);
+  const [editAdmobAppId, setEditAdmobAppId] = useState('');
+  const [editFirebaseProjectId, setEditFirebaseProjectId] = useState('');
+  const [editFirebaseAppId, setEditFirebaseAppId] = useState('');
+  const [editFirebaseProjectNumber, setEditFirebaseProjectNumber] = useState('');
+  const [editFirebaseStorageBucket, setEditFirebaseStorageBucket] = useState('');
   const [editBackendUrl, setEditBackendUrl] = useState('');
   const [editMaintenanceMsg, setEditMaintenanceMsg] = useState('');
   const [savingControls, setSavingControls] = useState(false);
@@ -312,6 +329,12 @@ export const AppWorkspacePage: React.FC<{
   const [rcMaintenance, setRcMaintenance] = useState(false);
   const [rcKillSwitch, setRcKillSwitch] = useState(false);
   const [rcRequireKey, setRcRequireKey] = useState(false);
+  const [rcAdsEnabled, setRcAdsEnabled] = useState(true);
+  const [rcAdmobAppId, setRcAdmobAppId] = useState('');
+  const [rcFirebaseProjectId, setRcFirebaseProjectId] = useState('');
+  const [rcFirebaseAppId, setRcFirebaseAppId] = useState('');
+  const [rcFirebaseProjectNumber, setRcFirebaseProjectNumber] = useState('');
+  const [rcFirebaseStorageBucket, setRcFirebaseStorageBucket] = useState('');
   const [rcMaintenanceMsg, setRcMaintenanceMsg] = useState('');
   const [rcBannerEnabled, setRcBannerEnabled] = useState(false);
   const [rcBannerTitle, setRcBannerTitle] = useState('');
@@ -323,6 +346,7 @@ export const AppWorkspacePage: React.FC<{
   const [newRcFlagVal, setNewRcFlagVal] = useState('true');
   const [savingRemoteConfig, setSavingRemoteConfig] = useState(false);
   const [sendingTestHeartbeat, setSendingTestHeartbeat] = useState(false);
+  const [autoRefreshHeartbeats, setAutoRefreshHeartbeats] = useState(false);
 
   // Collections & Module Generator
   const [activeCollectionSlug, setActiveCollectionSlug] = useState<string>('');
@@ -383,23 +407,49 @@ export const AppWorkspacePage: React.FC<{
     }
   };
 
-  const loadWorkspace = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
+  const loadWorkspace = useCallback(async (silent = false) => {
+    if (!silent) {
+      setLoading(true);
+      setLoadError(null);
+    }
     try {
       const data = await apiRequest<WorkspaceResponse>(`/apps/${appId}/workspace`);
       setWorkspace(data);
       setEditPackageName(data.app.packageName || data.app.packageOrDomain || '');
       setEditVersion(data.app.currentVersion);
+      setEditVersionCode(String(data.app.versionCode ?? data.remoteConfig?.version_gate?.version_code ?? 1));
       setEditMinVersion(data.app.minSupportedVersion);
       setEditForceUpdate(Boolean(data.app.forceUpdate));
       setEditAdsEnabled(Boolean(data.app.adsEnabled));
+      setEditAdmobAppId(data.app.admobAppId || '');
+      setEditFirebaseProjectId(data.app.firebaseProjectId || '');
+      setEditFirebaseAppId(data.app.firebaseAppId || '');
+      setEditFirebaseProjectNumber(data.app.firebaseProjectNumber || '');
+      setEditFirebaseStorageBucket(data.app.firebaseStorageBucket || '');
       setEditBackendUrl(data.app.backendBaseUrl || '');
       setEditMaintenanceMsg(data.app.maintenanceMessage || '');
       if (data.remoteConfig) {
         setRcMaintenance(Boolean(data.remoteConfig.maintenance));
         setRcKillSwitch(Boolean(data.remoteConfig.kill_switch));
         setRcRequireKey(Boolean(data.remoteConfig.require_sdk_key));
+        setRcAdsEnabled(
+          data.remoteConfig.ads?.enabled !== undefined
+            ? Boolean(data.remoteConfig.ads.enabled)
+            : Boolean(data.app.adsEnabled)
+        );
+        setRcAdmobAppId(data.remoteConfig.ads?.admob_app_id || data.app.admobAppId || '');
+        setRcFirebaseProjectId(
+          data.remoteConfig.firebase?.project_id || data.app.firebaseProjectId || ''
+        );
+        setRcFirebaseAppId(
+          data.remoteConfig.firebase?.app_id || data.app.firebaseAppId || ''
+        );
+        setRcFirebaseProjectNumber(
+          data.remoteConfig.firebase?.project_number || data.app.firebaseProjectNumber || ''
+        );
+        setRcFirebaseStorageBucket(
+          data.remoteConfig.firebase?.storage_bucket || data.app.firebaseStorageBucket || ''
+        );
         setRcMaintenanceMsg(data.remoteConfig.maintenance_message || '');
         setRcBannerEnabled(Boolean(data.remoteConfig.banner?.enabled));
         setRcBannerTitle(data.remoteConfig.banner?.title || '');
@@ -426,9 +476,13 @@ export const AppWorkspacePage: React.FC<{
         setActiveCollectionSlug('');
       }
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : 'Failed to load app workspace');
+      if (!silent) {
+        setLoadError(err instanceof Error ? err.message : 'Failed to load app workspace');
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, [appId]);
 
@@ -457,6 +511,14 @@ export const AppWorkspacePage: React.FC<{
   useEffect(() => {
     void loadWorkspace();
   }, [loadWorkspace]);
+
+  useEffect(() => {
+    if (!autoRefreshHeartbeats || tab !== 'announcements') return;
+    const timer = window.setInterval(() => {
+      void loadWorkspace(true);
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [autoRefreshHeartbeats, tab, loadWorkspace]);
 
   useEffect(() => {
     setEditingRecordId(null);
@@ -565,11 +627,19 @@ export const AppWorkspacePage: React.FC<{
       await apiRequest(`/apps/${app.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
-          packageName: editPackageName.trim(),
-          currentVersion: editVersion,
+          package_name: editPackageName.trim(),
+          version_name: editVersion,
+          version_code: Math.max(1, Math.floor(Number(editVersionCode) || 1)),
           minSupportedVersion: editMinVersion,
           forceUpdate: editForceUpdate,
           adsEnabled: editAdsEnabled,
+          admobAppId: editAdmobAppId.trim(),
+          connection_config: {
+            firebase_project_id: editFirebaseProjectId.trim(),
+            firebase_app_id: editFirebaseAppId.trim(),
+            firebase_project_number: editFirebaseProjectNumber.trim(),
+            firebase_storage_bucket: editFirebaseStorageBucket.trim(),
+          },
           backendBaseUrl: editBackendUrl,
           maintenanceMessage: editMaintenanceMsg,
         }),
@@ -692,6 +762,12 @@ export const AppWorkspacePage: React.FC<{
           maintenance: rcMaintenance,
           kill_switch: rcKillSwitch,
           require_sdk_key: rcRequireKey,
+          ads_enabled: rcAdsEnabled,
+          admob_app_id: rcAdmobAppId.trim(),
+          firebase_project_id: rcFirebaseProjectId.trim(),
+          firebase_app_id: rcFirebaseAppId.trim(),
+          firebase_project_number: rcFirebaseProjectNumber.trim(),
+          firebase_storage_bucket: rcFirebaseStorageBucket.trim(),
           maintenance_message: rcMaintenanceMsg.trim(),
           banner: {
             enabled: rcBannerEnabled,
@@ -742,6 +818,8 @@ export const AppWorkspacePage: React.FC<{
           last_seen_at: Date.now(),
           status: 'online',
           event: 'admin_probe',
+          device_model: 'Admin Console Probe',
+          os_version: 'Android SDK Emulator',
         }),
       });
       const json = (await res.json()) as { ok?: boolean; error?: string };
@@ -1188,34 +1266,111 @@ export const AppWorkspacePage: React.FC<{
                 v{app.currentVersion}
               </p>
               <p className="mt-0.5 text-[11px] text-slate-500 tabular-nums">
-                {stats.activeKeysCount} active keys · min v{app.minSupportedVersion}
+                code {app.versionCode ?? workspace.remoteConfig?.version_gate?.version_code ?? 1} · {stats.activeKeysCount} active keys · min v{app.minSupportedVersion}
               </p>
             </div>
           </div>
 
+          <section className="rounded-xl border border-slate-200 bg-white p-4 text-xs dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0 space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    Two-Way Package Control &amp; Optional Firebase Metadata
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => void copyText('ov-pkg', canonicalPackageName, 'package_name')}
+                    className="inline-flex items-center gap-1 rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-800 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
+                  >
+                    <span>{canonicalPackageName}</span>
+                    {copiedKey === 'ov-pkg' ? (
+                      <Check className="h-3 w-3 text-emerald-600" />
+                    ) : (
+                      <Copy className="h-3 w-3 text-slate-400" />
+                    )}
+                  </button>
+                  {workspace.remoteConfig?.kill_switch && (
+                    <span className="font-mono text-[11px] font-semibold text-red-600 dark:text-red-400">
+                      KILL-SWITCH ON
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-600 dark:text-slate-400">
+                  <span>
+                    Announcements:{' '}
+                    <strong className="font-mono text-slate-900 dark:text-slate-100">
+                      {announcements.filter((a) => a.active === 1).length} active
+                    </strong>{' '}
+                    / {announcements.length} total
+                  </span>
+                  <span>
+                    Latest Heartbeat:{' '}
+                    <strong className="font-mono text-slate-900 dark:text-slate-100">
+                      {heartbeats[0]
+                        ? `v${heartbeats[0].version_name || '-'} (${heartbeats[0].version_code}) · ${heartbeats[0].status}`
+                        : app.lastHeartbeatAt
+                          ? new Date(app.lastHeartbeatAt).toLocaleString()
+                          : 'Waiting for client'}
+                    </strong>
+                  </span>
+                  <span>
+                    Firebase:{' '}
+                    <strong className="font-mono text-slate-900 dark:text-slate-100">
+                      {app.firebaseProjectId || workspace.remoteConfig?.firebase?.project_id || 'Not configured'}
+                    </strong>
+                  </span>
+                  {(app.firebaseAppId || workspace.remoteConfig?.firebase?.app_id) && (
+                    <span className="truncate font-mono">
+                      App ID: {app.firebaseAppId || workspace.remoteConfig?.firebase?.app_id}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTab('announcements')}
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-blue-600 px-3 font-medium text-white hover:bg-blue-700"
+              >
+                <Megaphone className="h-3.5 w-3.5" />
+                Announcements, Flags &amp; Heartbeats
+              </button>
+            </div>
+          </section>
+
           <div className="grid gap-6 lg:grid-cols-12">
             <form
               onSubmit={handleSaveRuntimeControls}
-              className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-6 dark:border-slate-800 dark:bg-slate-900"
+              className="min-w-0 space-y-4 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-6 dark:border-slate-800 dark:bg-slate-900"
             >
               <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-slate-100">
-                App Runtime Configuration & External Backend Hook
+                App Runtime Configuration &amp; External Backend Hook
               </h2>
               <div className="text-xs">
                 <label className="block font-medium">Package Name (package_name) or Domain</label>
                 <input
                   value={editPackageName}
                   onChange={(e) => setEditPackageName(e.target.value)}
-                  placeholder="com.cyberking.candymindmatch"
+                  placeholder="com.company.myapp"
                   className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
                 />
               </div>
-              <div className="grid gap-3 sm:grid-cols-2 text-xs">
+              <div className="grid gap-3 sm:grid-cols-3 text-xs">
                 <div>
-                  <label className="block font-medium">Current Version</label>
+                  <label className="block font-medium">Version Name</label>
                   <input
                     value={editVersion}
                     onChange={(e) => setEditVersion(e.target.value)}
+                    className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium">Version Code</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={editVersionCode}
+                    onChange={(e) => setEditVersionCode(e.target.value)}
                     className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
                   />
                 </div>
@@ -1228,14 +1383,65 @@ export const AppWorkspacePage: React.FC<{
                   />
                 </div>
               </div>
-              <div className="text-xs">
-                <label className="block font-medium">External Backend Sync URL (optional HTTPS)</label>
-                <input
-                  value={editBackendUrl}
-                  onChange={(e) => setEditBackendUrl(e.target.value)}
-                  placeholder="https://api.yourapp.com"
-                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
-                />
+              <div className="grid gap-3 sm:grid-cols-2 text-xs">
+                <div>
+                  <label className="block font-medium">Firebase Project ID (optional)</label>
+                  <input
+                    value={editFirebaseProjectId}
+                    onChange={(e) => setEditFirebaseProjectId(e.target.value)}
+                    placeholder="my-firebase-project"
+                    className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium">Firebase App ID (optional)</label>
+                  <input
+                    value={editFirebaseAppId}
+                    onChange={(e) => setEditFirebaseAppId(e.target.value)}
+                    placeholder="1:123456789012:android:abc123def456"
+                    className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 text-xs">
+                <div>
+                  <label className="block font-medium">Firebase Project Number (optional)</label>
+                  <input
+                    value={editFirebaseProjectNumber}
+                    onChange={(e) => setEditFirebaseProjectNumber(e.target.value)}
+                    placeholder="123456789012"
+                    className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium">Firebase Storage Bucket (optional)</label>
+                  <input
+                    value={editFirebaseStorageBucket}
+                    onChange={(e) => setEditFirebaseStorageBucket(e.target.value)}
+                    placeholder="my-firebase-project.firebasestorage.app"
+                    className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 text-xs">
+                <div>
+                  <label className="block font-medium">AdMob App ID (optional)</label>
+                  <input
+                    value={editAdmobAppId}
+                    onChange={(e) => setEditAdmobAppId(e.target.value)}
+                    placeholder="ca-app-pub-xxxxxxxxxxxxxxxx~yyyyyyyyyy"
+                    className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium">External Backend Sync URL (optional HTTPS)</label>
+                  <input
+                    value={editBackendUrl}
+                    onChange={(e) => setEditBackendUrl(e.target.value)}
+                    placeholder="https://api.yourapp.com"
+                    className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
               </div>
               <div className="text-xs">
                 <label className="block font-medium">Maintenance Message</label>
@@ -1680,10 +1886,88 @@ export const AppWorkspacePage: React.FC<{
                 />
               </div>
 
+              <div className="space-y-2.5 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="inline-flex items-center gap-2 font-semibold text-slate-900 dark:text-slate-100">
+                    <input
+                      type="checkbox"
+                      checked={rcAdsEnabled}
+                      onChange={(e) => setRcAdsEnabled(e.target.checked)}
+                    />
+                    <span>Enable Ads SDK (ads_enabled)</span>
+                  </label>
+                  <span className="font-mono text-[11px] text-slate-500">
+                    Exposed in GET /api/v1/sdk/remote-config
+                  </span>
+                </div>
+                <input
+                  value={rcAdmobAppId}
+                  onChange={(e) => setRcAdmobAppId(e.target.value)}
+                  placeholder="AdMob App ID (optional, e.g. ca-app-pub-xxxxxxxxxxxxxxxx~yyyyyyyyyy)"
+                  aria-label="Remote Config AdMob App ID"
+                  className="h-8 w-full rounded-md border border-slate-200 px-2.5 font-mono dark:border-slate-700 dark:bg-slate-950"
+                />
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <input
+                    value={rcFirebaseProjectId}
+                    onChange={(e) => setRcFirebaseProjectId(e.target.value)}
+                    placeholder="Firebase Project ID (optional, e.g. my-firebase-project)"
+                    aria-label="Remote Config Firebase Project ID"
+                    className="h-8 rounded-md border border-slate-200 px-2.5 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                  <input
+                    value={rcFirebaseAppId}
+                    onChange={(e) => setRcFirebaseAppId(e.target.value)}
+                    placeholder="Firebase App ID (optional, e.g. 1:123456789012:android:...)"
+                    aria-label="Remote Config Firebase App ID"
+                    className="h-8 rounded-md border border-slate-200 px-2.5 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <input
+                    value={rcFirebaseProjectNumber}
+                    onChange={(e) => setRcFirebaseProjectNumber(e.target.value)}
+                    placeholder="Project Number (optional, e.g. 123456789012)"
+                    aria-label="Remote Config Firebase Project Number"
+                    className="h-8 rounded-md border border-slate-200 px-2.5 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                  <input
+                    value={rcFirebaseStorageBucket}
+                    onChange={(e) => setRcFirebaseStorageBucket(e.target.value)}
+                    placeholder="Storage Bucket (optional)"
+                    aria-label="Remote Config Firebase Storage Bucket"
+                    className="h-8 rounded-md border border-slate-200 px-2.5 font-mono dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </div>
+              </div>
+
               <div className="space-y-2">
-                <p className="font-semibold text-slate-900 dark:text-slate-100">
-                  Structured Remote Flags (key / value)
-                </p>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-semibold text-slate-900 dark:text-slate-100">
+                    Structured Remote Feature &amp; Ad Flags (key / value)
+                  </p>
+                  <div className="flex flex-wrap items-center gap-1">
+                    {[
+                      'rewarded_ads_enabled',
+                      'interstitial_ads_enabled',
+                      'banner_ads_enabled',
+                      'daily_bonus_enabled',
+                    ].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => {
+                          setRcFlagRows((prev) =>
+                            prev.some((r) => r.key === preset) ? prev : [...prev, { key: preset, value: 'true' }]
+                          );
+                        }}
+                        className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[10px] text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
+                      >
+                        +{preset}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 {rcFlagRows.length > 0 && (
                   <div className="space-y-1.5">
                     {rcFlagRows.map((row, idx) => (
@@ -1765,36 +2049,85 @@ export const AppWorkspacePage: React.FC<{
             </form>
           </div>
 
-          {/* Live App Heartbeats Table */}
-          <section className="rounded-xl border border-slate-200 bg-white p-5 text-xs dark:border-slate-800 dark:bg-slate-900">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          {/* Live App Status & Heartbeats Table */}
+          <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 text-xs dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="font-display text-sm font-semibold">
-                  Connected Client Heartbeats ({heartbeats.length})
+                  Live App Status &amp; Heartbeats ({heartbeats.length})
                 </h2>
                 <p className="text-slate-500">
-                  Last app heartbeat:{' '}
-                  <span className="font-mono">
-                    {app.lastHeartbeatAt ? new Date(app.lastHeartbeatAt).toLocaleString() : 'Never'}
-                  </span>
+                  Real-time two-way client telemetry for <code className="font-mono">{canonicalPackageName}</code>.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => void loadWorkspace()}
-                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 px-3 font-medium hover:bg-slate-50 dark:border-slate-700"
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-                Refresh
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAutoRefreshHeartbeats((prev) => !prev)}
+                  className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 font-medium ${
+                    autoRefreshHeartbeats
+                      ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300'
+                      : 'border-slate-200 hover:bg-slate-50 dark:border-slate-700'
+                  }`}
+                >
+                  <Activity className="h-3.5 w-3.5" />
+                  {autoRefreshHeartbeats ? 'Auto-Refresh ON (10s)' : 'Auto-Refresh (10s)'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void loadWorkspace()}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 px-3 font-medium hover:bg-slate-50 dark:border-slate-700"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Refresh
+                </button>
+              </div>
             </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-950/60">
+                <p className="text-[11px] text-slate-500">Reported App Status</p>
+                <p className="mt-0.5 font-mono text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  {heartbeats[0]?.status || app.status}
+                  {workspace.remoteConfig?.kill_switch ? ' (kill-switch)' : ''}
+                </p>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-950/60">
+                <p className="text-[11px] text-slate-500">Latest Version Name &amp; Code</p>
+                <p className="mt-0.5 font-mono text-sm font-semibold text-slate-900 dark:text-slate-100 tabular-nums">
+                  {heartbeats[0]
+                    ? `v${heartbeats[0].version_name || app.currentVersion} (${heartbeats[0].version_code})`
+                    : `v${app.currentVersion} (0)`}
+                </p>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-950/60">
+                <p className="text-[11px] text-slate-500">Last Seen At</p>
+                <p className="mt-0.5 font-mono text-sm font-semibold text-slate-900 dark:text-slate-100 tabular-nums">
+                  {heartbeats[0]?.last_seen_at
+                    ? new Date(heartbeats[0].last_seen_at).toLocaleString()
+                    : app.lastHeartbeatAt
+                      ? new Date(app.lastHeartbeatAt).toLocaleString()
+                      : 'Never'}
+                </p>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-950/60">
+                <p className="text-[11px] text-slate-500">Latest Device / Firebase</p>
+                <p className="mt-0.5 truncate font-mono text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  {heartbeats[0]?.device_model ||
+                    workspace.remoteConfig?.firebase?.project_id ||
+                    app.firebaseProjectId ||
+                    'Waiting'}
+                </p>
+              </div>
+            </div>
+
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead>
                   <tr className="border-b border-slate-200 text-slate-500 dark:border-slate-800">
                     <th className="py-2 pr-3 font-medium">Package Name</th>
                     <th className="py-2 pr-3 font-medium">Version</th>
-                    <th className="py-2 pr-3 font-medium">Platform</th>
+                    <th className="py-2 pr-3 font-medium">Device / OS</th>
                     <th className="py-2 pr-3 font-medium">Status / Event</th>
                     <th className="py-2 pr-3 font-medium">Client IP</th>
                     <th className="py-2 text-right font-medium">Last Seen</th>
@@ -1816,7 +2149,14 @@ export const AppWorkspacePage: React.FC<{
                         <td className="py-2.5 pr-3 font-mono tabular-nums">
                           v{hb.version_name || '-'} ({hb.version_code})
                         </td>
-                        <td className="py-2.5 pr-3 capitalize">{hb.platform}</td>
+                        <td className="py-2.5 pr-3">
+                          <span className="capitalize">{hb.platform}</span>
+                          {hb.device_model || hb.os_version ? (
+                            <span className="block truncate font-mono text-[11px] text-slate-500 max-w-[200px]">
+                              {[hb.device_model, hb.os_version].filter(Boolean).join(' · ')}
+                            </span>
+                          ) : null}
+                        </td>
                         <td className="py-2.5 pr-3 font-mono">
                           <span className="text-emerald-700 dark:text-emerald-400">{hb.status}</span> · {hb.event}
                         </td>

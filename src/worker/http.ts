@@ -139,6 +139,9 @@ export function applySdkCorsHeaders(response: Response): Response {
     'Access-Control-Allow-Headers',
     'Content-Type, Authorization, X-App-Id, X-Package-Name, X-API-Key, X-CSRF-Token, X-Aegis-Signature, X-Requested-With, Accept'
   );
+  headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  headers.set('Pragma', 'no-cache');
+  headers.set('Expires', '0');
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,

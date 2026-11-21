@@ -18,13 +18,23 @@ import {
 } from '../../lib/appDiscovery.ts';
 import {
   deriveAppNameFromPackage,
+  extractAppVersionCode,
+  extractConnectionConfig,
+  extractHeartbeatDeviceInfo,
   isValidPackageNameFormat,
   normalizePackageName,
   parseFlexibleTimestampMs,
+  parseVersionCode,
   sanitizeBannerUrl,
   sanitizeRemoteBanner,
   sanitizeRemoteFlags,
   toActiveBinary,
+  validateFirebaseAppId,
+  validateFirebaseProjectId,
+  validateFirebaseProjectNumber,
+  validateFirebaseStorageBucket,
+  withConnectionSettings,
+  withFirebaseSettings,
   type RemoteFlagScalar,
 } from '../../lib/packageSync.ts';
 import { generateSessionToken, generateUid, sanitizeText } from '../../lib/security.ts';
@@ -119,6 +129,11 @@ export function buildRemoteConfigPayload(params: {
     (app.settingsJson as Record<string, unknown> | undefined)?.requireSdkKeyForPackageSync
   );
 
+  const conn = extractConnectionConfig(app.settingsJson, {
+    integrationMode: app.integrationMode,
+    backendBaseUrl: app.backendBaseUrl,
+  });
+  const versionCode = extractAppVersionCode(app.settingsJson);
   const updatedAtMs = Math.max(
     new Date(app.updatedAt).getTime(),
     remoteConfig ? new Date(remoteConfig.updatedAt).getTime() : 0
@@ -137,6 +152,7 @@ export function buildRemoteConfigPayload(params: {
     require_sdk_key: requireSdkKey,
     version_gate: {
       current_version: latestRelease?.version || app.currentVersion,
+      version_code: versionCode,
       min_supported_version: latestRelease?.minSupportedVersion || app.minSupportedVersion,
       force_update: Boolean(latestRelease?.forceUpdate ?? app.forceUpdate),
     },
@@ -144,6 +160,18 @@ export function buildRemoteConfigPayload(params: {
     ads: {
       enabled: Boolean(app.adsEnabled),
       admob_app_id: app.admobAppId || '',
+    },
+    firebase: {
+      configured: Boolean(conn.firebase_project_id || conn.firebase_app_id),
+      project_id: conn.firebase_project_id,
+      app_id: conn.firebase_app_id,
+      project_number: conn.firebase_project_number,
+      storage_bucket: conn.firebase_storage_bucket,
+    },
+    connection: {
+      auth_mode: conn.auth_mode,
+      sync_mode: conn.sync_mode,
+      require_sdk_key: conn.require_sdk_key,
     },
     flags: scalarFlags,
     feature_flags: structuredFlags,
@@ -219,7 +247,7 @@ async function resolveSdkAppForPackageRead(
       ok: false,
       response: errorResponse(
         400,
-        'package_name query parameter or X-Package-Name header is required (e.g. ?package_name=com.cyberking.candymindmatch).'
+        'package_name query parameter or X-Package-Name header is required (e.g. ?package_name=com.company.myapp).'
       ),
     };
   }
@@ -229,7 +257,7 @@ async function resolveSdkAppForPackageRead(
       ok: false,
       response: errorResponse(
         400,
-        'Invalid package_name format. Expected reverse-DNS package like com.cyberking.candymindmatch.'
+        'Invalid package_name format. Expected reverse-DNS package like com.company.myapp.'
       ),
     };
   }
@@ -298,6 +326,22 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
       status?: string;
       app_name?: string;
       name?: string;
+      firebase_project_id?: string;
+      firebaseProjectId?: string;
+      firebase_app_id?: string;
+      firebaseAppId?: string;
+      firebase_project_number?: string;
+      firebaseProjectNumber?: string;
+      firebase_storage_bucket?: string;
+      firebaseStorageBucket?: string;
+      device_model?: string;
+      deviceModel?: string;
+      device?: string;
+      device_name?: string;
+      os_version?: string;
+      osVersion?: string;
+      android_version?: string;
+      manufacturer?: string;
       payload?: Record<string, unknown>;
     }>(ctx.request);
 
@@ -327,7 +371,7 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
       if (rawPkg && !isValidPackageNameFormat(rawPkg)) {
         return errorResponse(
           400,
-          'Invalid package_name format. Expected reverse-DNS package like com.cyberking.candymindmatch.'
+          'Invalid package_name format. Expected reverse-DNS package like com.company.myapp.'
         );
       }
       const auth = await authenticateSdkRequest(ctx, 'events:write', rawPkg);
@@ -338,13 +382,13 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
       if (!rawPkg) {
         return errorResponse(
           400,
-          'package_name is required (e.g. "com.cyberking.candymindmatch").'
+          'package_name is required (e.g. "com.company.myapp").'
         );
       }
       if (!isValidPackageNameFormat(rawPkg)) {
         return errorResponse(
           400,
-          'Invalid package_name format. Expected reverse-DNS package like com.cyberking.candymindmatch.'
+          'Invalid package_name format. Expected reverse-DNS package like com.company.myapp.'
         );
       }
       app = await resolveAppByPackageName(ctx, rawPkg);
@@ -412,6 +456,30 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
         integrationMode: 'aegis_managed',
       });
 
+      const fbProjectRaw = body.firebase_project_id ?? body.firebaseProjectId;
+      const fbAppRaw = body.firebase_app_id ?? body.firebaseAppId;
+      const fbNumRaw = body.firebase_project_number ?? body.firebaseProjectNumber;
+      const fbBucketRaw = body.firebase_storage_bucket ?? body.firebaseStorageBucket;
+      const fbProject = validateFirebaseProjectId(fbProjectRaw);
+      const fbApp = validateFirebaseAppId(fbAppRaw);
+      const fbNum = validateFirebaseProjectNumber(fbNumRaw);
+      const fbBucket = validateFirebaseStorageBucket(fbBucketRaw);
+      const initialSettings = withConnectionSettings(
+        {
+          lastClientVersionName: versionName || '1.0.0',
+          lastClientVersionCode: versionCode,
+        },
+        {
+          versionCode: parseVersionCode(versionCode, 1),
+          connectionConfig: {
+            firebase_project_id: fbProject.error ? undefined : fbProject.value || undefined,
+            firebase_app_id: fbApp.error ? undefined : fbApp.value || undefined,
+            firebase_project_number: fbNum.error ? undefined : fbNum.value || undefined,
+            firebase_storage_bucket: fbBucket.error ? undefined : fbBucket.value || undefined,
+          },
+        }
+      );
+
       const insertedApps = await ctx.db
         .insert(connectedApps)
         .values({
@@ -437,10 +505,7 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
           discoveredCapabilities: discovery as unknown as Record<string, unknown>,
           enabledModules: discovery.recommendedModules,
           syncStatus: 'verified',
-          settingsJson: {
-            lastClientVersionName: versionName || '1.0.0',
-            lastClientVersionCode: versionCode,
-          },
+          settingsJson: initialSettings,
         })
         .returning();
 
@@ -501,6 +566,25 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
     ctx.sdkAppId = app.id;
     const effectivePkg = normalizedPkg || app.packageName || app.packageOrDomain;
 
+    const topDevice = sanitizeText(
+      body.device_model ?? body.deviceModel ?? body.device ?? body.device_name,
+      100
+    );
+    const topOs = sanitizeText(body.os_version ?? body.osVersion ?? body.android_version, 60);
+    const topManufacturer = sanitizeText(body.manufacturer, 60);
+    const mergedPayload: Record<string, unknown> = { ...payloadObj };
+    if (topDevice && !mergedPayload.device_model && !mergedPayload.deviceModel) {
+      mergedPayload.device_model = topDevice;
+    }
+    if (topOs && !mergedPayload.os_version && !mergedPayload.osVersion) {
+      mergedPayload.os_version = topOs;
+    }
+    if (topManufacturer && !mergedPayload.manufacturer) {
+      mergedPayload.manufacturer = topManufacturer;
+    }
+    const cleanUa = sanitizeText(ctx.userAgent, 250);
+    const deviceInfo = extractHeartbeatDeviceInfo(mergedPayload, cleanUa);
+
     const insertedHb = await ctx.db
       .insert(appHeartbeats)
       .values({
@@ -511,9 +595,9 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
         platform,
         status: heartbeatStatus,
         event: heartbeatEvent,
-        payloadJson: payloadObj,
+        payloadJson: mergedPayload,
         ipAddress: ctx.clientIp,
-        userAgent: sanitizeText(ctx.userAgent, 250),
+        userAgent: cleanUa,
         lastSeenAt: lastSeenDate,
       })
       .returning();
@@ -524,6 +608,8 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
         lastClientVersionName: versionName || app.currentVersion,
         lastClientVersionCode: versionCode,
         lastClientPlatform: platform,
+        lastClientDeviceModel: deviceInfo.device_model,
+        lastClientOsVersion: deviceInfo.os_version,
       };
       const nextHealth =
         heartbeatStatus === 'error' || heartbeatStatus === 'degraded' || heartbeatStatus === 'critical'
@@ -562,7 +648,7 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
           version_code: versionCode,
           platform,
           status: heartbeatStatus,
-          ...payloadObj,
+          ...mergedPayload,
         },
       })
       .catch(() => {});
@@ -584,6 +670,9 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
           platform: hb.platform,
           status: hb.status,
           event: hb.event,
+          device_model: deviceInfo.device_model,
+          os_version: deviceInfo.os_version,
+          user_agent: cleanUa,
           last_seen_at: new Date(hb.lastSeenAt).getTime(),
           last_seen_iso: new Date(hb.lastSeenAt).toISOString(),
         },
@@ -973,15 +1062,51 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
       flags?: Record<string, unknown>;
       current_version?: string;
       currentVersion?: string;
+      version_code?: number | string;
+      versionCode?: number | string;
       min_supported_version?: string;
       minSupportedVersion?: string;
       force_update?: boolean;
       forceUpdate?: boolean;
       ads_enabled?: boolean;
       adsEnabled?: boolean;
+      admob_app_id?: string;
+      admobAppId?: string;
+      firebase_project_id?: string;
+      firebaseProjectId?: string;
+      firebase_app_id?: string;
+      firebaseAppId?: string;
+      firebase_project_number?: string;
+      firebaseProjectNumber?: string;
+      firebase_storage_bucket?: string;
+      firebaseStorageBucket?: string;
       require_sdk_key?: boolean;
       requireSdkKey?: boolean;
     }>(ctx.request);
+
+    const fbProjectRaw = body.firebase_project_id ?? body.firebaseProjectId;
+    const fbAppRaw = body.firebase_app_id ?? body.firebaseAppId;
+    const fbNumRaw = body.firebase_project_number ?? body.firebaseProjectNumber;
+    const fbBucketRaw = body.firebase_storage_bucket ?? body.firebaseStorageBucket;
+    const fbProjectChecked =
+      fbProjectRaw !== undefined ? validateFirebaseProjectId(fbProjectRaw) : null;
+    if (fbProjectChecked?.error) {
+      return errorResponse(400, fbProjectChecked.error);
+    }
+    const fbAppChecked = fbAppRaw !== undefined ? validateFirebaseAppId(fbAppRaw) : null;
+    if (fbAppChecked?.error) {
+      return errorResponse(400, fbAppChecked.error);
+    }
+    const fbNumChecked =
+      fbNumRaw !== undefined ? validateFirebaseProjectNumber(fbNumRaw) : null;
+    if (fbNumChecked?.error) {
+      return errorResponse(400, fbNumChecked.error);
+    }
+    const fbBucketChecked =
+      fbBucketRaw !== undefined ? validateFirebaseStorageBucket(fbBucketRaw) : null;
+    if (fbBucketChecked?.error) {
+      return errorResponse(400, fbBucketChecked.error);
+    }
 
     const nextMaintenance =
       typeof body.maintenance === 'boolean'
@@ -1041,12 +1166,26 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
       })
       .returning();
 
-    // Synchronize connected_apps status & version/ad fields cleanly
-    const currentSettings = { ...((app.settingsJson as Record<string, unknown>) || {}) };
+    // Synchronize connected_apps status, version, ad & optional Firebase metadata cleanly
+    let currentSettings = { ...((app.settingsJson as Record<string, unknown>) || {}) };
     if (body.require_sdk_key !== undefined || body.requireSdkKey !== undefined) {
       currentSettings.requireSdkKeyForPackageSync = Boolean(
         body.require_sdk_key ?? body.requireSdkKey
       );
+    }
+    const nextVersionCodeRaw = body.version_code ?? body.versionCode;
+    if (nextVersionCodeRaw !== undefined) {
+      currentSettings = withConnectionSettings(currentSettings, {
+        versionCode: parseVersionCode(nextVersionCodeRaw, extractAppVersionCode(currentSettings)),
+      });
+    }
+    if (fbProjectChecked || fbAppChecked || fbNumChecked || fbBucketChecked) {
+      currentSettings = withFirebaseSettings(currentSettings, {
+        firebaseProjectId: fbProjectChecked ? fbProjectChecked.value : undefined,
+        firebaseAppId: fbAppChecked ? fbAppChecked.value : undefined,
+        firebaseProjectNumber: fbNumChecked ? fbNumChecked.value : undefined,
+        firebaseStorageBucket: fbBucketChecked ? fbBucketChecked.value : undefined,
+      });
     }
 
     const nextAppStatus =
@@ -1069,6 +1208,10 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
       typeof (body.ads_enabled ?? body.adsEnabled) === 'boolean'
         ? Boolean(body.ads_enabled ?? body.adsEnabled)
         : app.adsEnabled;
+    const nextAdmobAppId =
+      body.admob_app_id !== undefined || body.admobAppId !== undefined
+        ? sanitizeText(body.admob_app_id ?? body.admobAppId, 120)
+        : app.admobAppId;
 
     const updatedAppRows = await ctx.db
       .update(connectedApps)
@@ -1079,6 +1222,7 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
         minSupportedVersion: nextMinVersion,
         forceUpdate: nextForceUpdate,
         adsEnabled: nextAdsEnabled,
+        admobAppId: nextAdmobAppId,
         settingsJson: currentSettings,
         updatedAt: now,
       })
@@ -1166,20 +1310,26 @@ export function registerPackageSyncRoutes(router: WorkerRouter): void {
     return jsonResponse({
       package_name: app.packageName || app.packageOrDomain,
       total: Number(countRows[0]?.count ?? 0),
-      data: rows.map((r) => ({
-        id: r.id,
-        appId: r.appId,
-        package_name: r.packageName,
-        version_name: r.versionName,
-        version_code: r.versionCode,
-        platform: r.platform,
-        status: r.status,
-        event: r.event,
-        payload: r.payloadJson,
-        ip_address: r.ipAddress,
-        last_seen_at: new Date(r.lastSeenAt).toISOString(),
-        created_at: new Date(r.createdAt).toISOString(),
-      })),
+      data: rows.map((r) => {
+        const dev = extractHeartbeatDeviceInfo(r.payloadJson, r.userAgent);
+        return {
+          id: r.id,
+          appId: r.appId,
+          package_name: r.packageName,
+          version_name: r.versionName,
+          version_code: r.versionCode,
+          platform: r.platform,
+          status: r.status,
+          event: r.event,
+          device_model: dev.device_model,
+          os_version: dev.os_version,
+          user_agent: r.userAgent,
+          payload: r.payloadJson,
+          ip_address: r.ipAddress,
+          last_seen_at: new Date(r.lastSeenAt).toISOString(),
+          created_at: new Date(r.createdAt).toISOString(),
+        };
+      }),
     });
   });
 }

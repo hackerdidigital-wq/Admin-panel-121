@@ -730,7 +730,7 @@ export function generatePlatformIntegrationSnippets(params: {
   const base = params.apiBaseUrl.replace(/\/+$/, '');
   const uid = params.appUid || 'app_your_uid';
   const key = params.apiKey || 'aegis_live_YOUR_API_KEY';
-  const pkg = params.packageName || 'com.cyberking.candymindmatch';
+  const pkg = params.packageName || 'com.company.myapp';
   const sampleSlug = params.collections?.[0]?.slug || 'leaderboard';
 
   const curl = `# 1. Send App -> Admin Panel heartbeat (by package_name)

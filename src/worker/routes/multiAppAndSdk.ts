@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, sql, type SQL } from 'drizzle-orm';
 import {
   adConfigs,
   apiLogs,
@@ -32,7 +32,21 @@ import {
   type IntegrationMode,
 } from '../../lib/appDiscovery.ts';
 import { toCsv } from '../../lib/csv.ts';
-import { derivePackageNameFromInput, normalizePackageName } from '../../lib/packageSync.ts';
+import {
+  derivePackageNameFromInput,
+  extractAppVersionCode,
+  extractConnectionConfig,
+  extractFirebaseMetadata,
+  normalizePackageName,
+  parseQuickConnectJson,
+  parseVersionCode,
+  sanitizeConnectionConfig,
+  validateFirebaseAppId,
+  validateFirebaseProjectId,
+  validateFirebaseProjectNumber,
+  validateFirebaseStorageBucket,
+  withConnectionSettings,
+} from '../../lib/packageSync.ts';
 import { computeSha256, generateSessionToken, generateUid, sanitizeText } from '../../lib/security.ts';
 import { parsePaginationQuery, slugify } from '../../lib/validation.ts';
 import {
@@ -388,106 +402,263 @@ export async function authenticateSdkRequest(
   return { ok: true, app, apiKeyRow };
 }
 
+function formatAppRecord(app: typeof connectedApps.$inferSelect) {
+  const fb = extractFirebaseMetadata(app.settingsJson);
+  const connectionConfig = extractConnectionConfig(app.settingsJson, {
+    integrationMode: app.integrationMode,
+    backendBaseUrl: app.backendBaseUrl,
+  });
+  const versionCode = extractAppVersionCode(app.settingsJson);
+  return {
+    ...app,
+    webhookSecret: undefined,
+    hasWebhookSecret: Boolean(app.webhookSecret),
+    versionCode,
+    connectionConfig,
+    firebaseProjectId: fb.firebase_project_id,
+    firebaseAppId: fb.firebase_app_id,
+    firebaseProjectNumber: fb.firebase_project_number,
+    firebaseStorageBucket: fb.firebase_storage_bucket,
+  };
+}
+
+function buildAppsFilterConditions(q: Record<string, string>): SQL[] {
+  const platform = sanitizeText(q.platform || 'all', 30);
+  const status = sanitizeText(q.status || 'all', 30);
+  const search = sanitizeText(q.search || '', 100).toLowerCase();
+  const pkgFilter = normalizePackageName(q.package_name || q.packageName || '');
+
+  const conditions: SQL[] = [];
+  if (platform !== 'all' && VALID_PLATFORMS.includes(platform as (typeof VALID_PLATFORMS)[number])) {
+    conditions.push(eq(connectedApps.platform, platform));
+  }
+  if (status !== 'all' && VALID_APP_STATUSES.includes(status as (typeof VALID_APP_STATUSES)[number])) {
+    conditions.push(eq(connectedApps.status, status));
+  }
+  if (pkgFilter) {
+    conditions.push(
+      sql`(lower(${connectedApps.packageName}) = ${pkgFilter} OR lower(trim(${connectedApps.packageOrDomain})) = ${pkgFilter})`
+    );
+  }
+  if (search) {
+    const pattern = `%${search}%`;
+    conditions.push(
+      sql`(lower(${connectedApps.name}) LIKE ${pattern} OR lower(${connectedApps.appUid}) LIKE ${pattern} OR lower(${connectedApps.packageName}) LIKE ${pattern} OR lower(${connectedApps.packageOrDomain}) LIKE ${pattern})`
+    );
+  }
+  return conditions;
+}
+
 export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
-  // ---- COMBINED MULTI-APP OVERVIEW ----
+  // ---- COMBINED MULTI-APP OVERVIEW (SQL-PAGINATED FOR UNLIMITED APPS) ----
   router.get('/api/apps/overview', async (ctx: WorkerContext) => {
     const permFail = await requirePermission(ctx, 'apps.read');
     if (permFail) return permFail;
 
+    const q = queryRecord(ctx);
+    const page = Math.max(1, Number(q.page) || 1);
+    const limit = Math.min(200, Math.max(1, Number(q.limit) || 50));
+    const offset = (page - 1) * limit;
+    const conditions = buildAppsFilterConditions(q);
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
     const cutoff24h = new Date(Date.now() - 86_400_000);
-    const [apps, allEndUsers, txRows, adRows, ticketRows, keyRows, errEvents] = await Promise.all([
-      ctx.db.select().from(connectedApps).orderBy(desc(connectedApps.updatedAt)),
-      ctx.db
-        .select({
-          appId: appUsers.appId,
-          status: appUsers.status,
-          lastActiveAt: appUsers.lastActiveAt,
-        })
-        .from(appUsers),
-      ctx.db
-        .select({
-          appId: transactions.appId,
-          amountCents: transactions.amountCents,
-          status: transactions.status,
-          type: transactions.type,
-        })
-        .from(transactions),
-      ctx.db
-        .select({
-          appId: adConfigs.appId,
-          revenueCents: adConfigs.revenueCents,
-          impressions: adConfigs.impressions,
-          clicks: adConfigs.clicks,
-        })
-        .from(adConfigs),
-      ctx.db
-        .select({
-          appId: supportTickets.appId,
-          status: supportTickets.status,
-        })
-        .from(supportTickets),
-      ctx.db
-        .select({
-          appId: appApiKeys.appId,
-          isActive: appApiKeys.isActive,
-        })
-        .from(appApiKeys),
-      ctx.db
-        .select({
-          appId: appEvents.appId,
-          severity: appEvents.severity,
-        })
-        .from(appEvents)
-        .where(and(gte(appEvents.createdAt, cutoff24h), sql`${appEvents.severity} IN ('error', 'critical')`)),
-    ]);
+    const [apps, filteredCountRows, appStatusTotals, userTotals, txTotalRow, adTotalRow, errTotalRow] =
+      await Promise.all([
+        ctx.db
+          .select()
+          .from(connectedApps)
+          .where(whereClause)
+          .orderBy(desc(connectedApps.updatedAt))
+          .limit(limit)
+          .offset(offset),
+        ctx.db
+          .select({ count: sql<number>`cast(count(*) as integer)` })
+          .from(connectedApps)
+          .where(whereClause),
+        ctx.db
+          .select({
+            status: connectedApps.status,
+            count: sql<number>`cast(count(*) as integer)`,
+          })
+          .from(connectedApps)
+          .groupBy(connectedApps.status),
+        ctx.db
+          .select({
+            status: appUsers.status,
+            count: sql<number>`cast(count(*) as integer)`,
+          })
+          .from(appUsers)
+          .groupBy(appUsers.status),
+        ctx.db
+          .select({
+            totalCents: sql<number>`cast(coalesce(sum(${transactions.amountCents}), 0) as integer)`,
+          })
+          .from(transactions)
+          .where(and(eq(transactions.status, 'succeeded'), eq(transactions.type, 'payment'))),
+        ctx.db
+          .select({
+            totalCents: sql<number>`cast(coalesce(sum(${adConfigs.revenueCents}), 0) as integer)`,
+          })
+          .from(adConfigs),
+        ctx.db
+          .select({ count: sql<number>`cast(count(*) as integer)` })
+          .from(appEvents)
+          .where(and(gte(appEvents.createdAt, cutoff24h), sql`${appEvents.severity} IN ('error', 'critical')`)),
+      ]);
+
+    const pageAppIds = apps.map((a) => a.id);
+    const [userGroupRows, txGroupRows, adGroupRows, ticketGroupRows, keyGroupRows, errGroupRows] =
+      pageAppIds.length > 0
+        ? await Promise.all([
+            ctx.db
+              .select({
+                appId: appUsers.appId,
+                status: appUsers.status,
+                count: sql<number>`cast(count(*) as integer)`,
+              })
+              .from(appUsers)
+              .where(inArray(appUsers.appId, pageAppIds))
+              .groupBy(appUsers.appId, appUsers.status),
+            ctx.db
+              .select({
+                appId: transactions.appId,
+                totalCents: sql<number>`cast(coalesce(sum(${transactions.amountCents}), 0) as integer)`,
+              })
+              .from(transactions)
+              .where(
+                and(
+                  inArray(transactions.appId, pageAppIds),
+                  eq(transactions.status, 'succeeded'),
+                  eq(transactions.type, 'payment')
+                )
+              )
+              .groupBy(transactions.appId),
+            ctx.db
+              .select({
+                appId: adConfigs.appId,
+                totalCents: sql<number>`cast(coalesce(sum(${adConfigs.revenueCents}), 0) as integer)`,
+              })
+              .from(adConfigs)
+              .where(inArray(adConfigs.appId, pageAppIds))
+              .groupBy(adConfigs.appId),
+            ctx.db
+              .select({
+                appId: supportTickets.appId,
+                count: sql<number>`cast(count(*) as integer)`,
+              })
+              .from(supportTickets)
+              .where(
+                and(
+                  inArray(supportTickets.appId, pageAppIds),
+                  sql`${supportTickets.status} IN ('open', 'pending')`
+                )
+              )
+              .groupBy(supportTickets.appId),
+            ctx.db
+              .select({
+                appId: appApiKeys.appId,
+                count: sql<number>`cast(count(*) as integer)`,
+              })
+              .from(appApiKeys)
+              .where(and(inArray(appApiKeys.appId, pageAppIds), eq(appApiKeys.isActive, true)))
+              .groupBy(appApiKeys.appId),
+            ctx.db
+              .select({
+                appId: appEvents.appId,
+                count: sql<number>`cast(count(*) as integer)`,
+              })
+              .from(appEvents)
+              .where(
+                and(
+                  inArray(appEvents.appId, pageAppIds),
+                  gte(appEvents.createdAt, cutoff24h),
+                  sql`${appEvents.severity} IN ('error', 'critical')`
+                )
+              )
+              .groupBy(appEvents.appId),
+          ])
+        : [[], [], [], [], [], []];
+
+    const txByApp = new Map(txGroupRows.map((r) => [r.appId, Number(r.totalCents)]));
+    const adByApp = new Map(adGroupRows.map((r) => [r.appId, Number(r.totalCents)]));
+    const ticketsByApp = new Map(ticketGroupRows.map((r) => [r.appId, Number(r.count)]));
+    const keysByApp = new Map(keyGroupRows.map((r) => [r.appId, Number(r.count)]));
+    const errByApp = new Map(errGroupRows.map((r) => [r.appId, Number(r.count)]));
 
     const perApp = apps.map((app) => {
-      const usersForApp = allEndUsers.filter((u) => u.appId === app.id);
-      const activeForApp = usersForApp.filter((u) => u.status === 'active').length;
-      const bannedForApp = usersForApp.filter((u) => u.status === 'banned').length;
-      const revForApp = txRows
-        .filter((t) => t.appId === app.id && t.status === 'succeeded' && t.type === 'payment')
-        .reduce((sum, t) => sum + t.amountCents, 0);
-      const adRevForApp = adRows
-        .filter((a) => a.appId === app.id)
-        .reduce((sum, a) => sum + a.revenueCents, 0);
-      const openTicketsForApp = ticketRows.filter(
-        (t) => t.appId === app.id && (t.status === 'open' || t.status === 'pending')
-      ).length;
-      const activeKeysCount = keyRows.filter((k) => k.appId === app.id && k.isActive).length;
-      const errors24h = errEvents.filter((e) => e.appId === app.id).length;
-
+      let totalUsers = 0;
+      let activeUsers = 0;
+      let bannedUsers = 0;
+      for (const u of userGroupRows) {
+        if (u.appId === app.id) {
+          const c = Number(u.count);
+          totalUsers += c;
+          if (u.status === 'active') activeUsers += c;
+          if (u.status === 'banned') bannedUsers += c;
+        }
+      }
       return {
-        ...app,
+        ...formatAppRecord(app),
         stats: {
-          totalUsers: usersForApp.length,
-          activeUsers: activeForApp,
-          bannedUsers: bannedForApp,
-          revenueCents: revForApp,
-          adRevenueCents: adRevForApp,
-          openTickets: openTicketsForApp,
-          activeKeysCount,
-          errors24h,
+          totalUsers,
+          activeUsers,
+          bannedUsers,
+          revenueCents: txByApp.get(app.id) ?? 0,
+          adRevenueCents: adByApp.get(app.id) ?? 0,
+          openTickets: ticketsByApp.get(app.id) ?? 0,
+          activeKeysCount: keysByApp.get(app.id) ?? 0,
+          errors24h: errByApp.get(app.id) ?? 0,
         },
       };
     });
 
+    let totalApps = 0;
+    let connectedCount = 0;
+    let maintenanceCount = 0;
+    let disconnectedCount = 0;
+    for (const row of appStatusTotals) {
+      const c = Number(row.count);
+      totalApps += c;
+      if (row.status === 'connected') connectedCount += c;
+      else if (row.status === 'maintenance') maintenanceCount += c;
+      else if (row.status === 'disconnected') disconnectedCount += c;
+    }
+
+    let totalEndUsers = 0;
+    let activeEndUsers = 0;
+    let bannedEndUsers = 0;
+    for (const row of userTotals) {
+      const c = Number(row.count);
+      totalEndUsers += c;
+      if (row.status === 'active') activeEndUsers += c;
+      else if (row.status === 'banned') bannedEndUsers += c;
+    }
+
+    const totalFiltered = Number(filteredCountRows[0]?.count ?? 0);
     const summary = {
-      totalApps: apps.length,
-      connectedApps: apps.filter((a) => a.status === 'connected').length,
-      maintenanceApps: apps.filter((a) => a.status === 'maintenance').length,
-      disconnectedApps: apps.filter((a) => a.status === 'disconnected').length,
-      totalEndUsers: allEndUsers.length,
-      activeEndUsers: allEndUsers.filter((u) => u.status === 'active').length,
-      bannedEndUsers: allEndUsers.filter((u) => u.status === 'banned').length,
-      totalRevenueCents: txRows
-        .filter((t) => t.status === 'succeeded' && t.type === 'payment')
-        .reduce((s, t) => s + t.amountCents, 0),
-      totalAdRevenueCents: adRows.reduce((s, a) => s + a.revenueCents, 0),
-      errors24h: errEvents.length,
+      totalApps,
+      connectedApps: connectedCount,
+      maintenanceApps: maintenanceCount,
+      disconnectedApps: disconnectedCount,
+      totalEndUsers,
+      activeEndUsers,
+      bannedEndUsers,
+      totalRevenueCents: Number(txTotalRow[0]?.totalCents ?? 0),
+      totalAdRevenueCents: Number(adTotalRow[0]?.totalCents ?? 0),
+      errors24h: Number(errTotalRow[0]?.count ?? 0),
     };
 
-    return jsonResponse({ summary, apps: perApp });
+    return jsonResponse({
+      summary,
+      apps: perApp,
+      pagination: {
+        page,
+        limit,
+        total: totalFiltered,
+        totalPages: Math.max(1, Math.ceil(totalFiltered / limit)),
+      },
+    });
   });
 
   // ---- CONNECTED APPS DIRECTORY & CRUD ----
@@ -496,84 +667,98 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     if (permFail) return permFail;
 
     const q = queryRecord(ctx);
-    const platform = sanitizeText(q.platform || 'all', 30);
-    const status = sanitizeText(q.status || 'all', 30);
-    const search = sanitizeText(q.search || '', 100).toLowerCase();
-    const pkgFilter = normalizePackageName(q.package_name || q.packageName || '');
+    const page = Math.max(1, Number(q.page) || 1);
+    const limit = Math.min(200, Math.max(1, Number(q.limit) || 50));
+    const offset = (page - 1) * limit;
+    const conditions = buildAppsFilterConditions(q);
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
-    const conditions: SQL[] = [];
-    if (platform !== 'all' && VALID_PLATFORMS.includes(platform as (typeof VALID_PLATFORMS)[number])) {
-      conditions.push(eq(connectedApps.platform, platform));
-    }
-    if (status !== 'all' && VALID_APP_STATUSES.includes(status as (typeof VALID_APP_STATUSES)[number])) {
-      conditions.push(eq(connectedApps.status, status));
-    }
-    if (pkgFilter) {
-      conditions.push(
-        sql`(lower(${connectedApps.packageName}) = ${pkgFilter} OR lower(trim(${connectedApps.packageOrDomain})) = ${pkgFilter})`
-      );
-    }
-    if (search) {
-      const pattern = `%${search}%`;
-      conditions.push(
-        sql`(lower(${connectedApps.name}) LIKE ${pattern} OR lower(${connectedApps.appUid}) LIKE ${pattern} OR lower(${connectedApps.packageName}) LIKE ${pattern} OR lower(${connectedApps.packageOrDomain}) LIKE ${pattern})`
-      );
-    }
-
-    const apps = await ctx.db
-      .select()
-      .from(connectedApps)
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(connectedApps.updatedAt));
-
-    const [userCounts, keyCounts] = await Promise.all([
+    const [apps, totalRows] = await Promise.all([
       ctx.db
-        .select({
-          appId: appUsers.appId,
-          count: sql<number>`cast(count(*) as integer)`,
-        })
-        .from(appUsers)
-        .groupBy(appUsers.appId),
+        .select()
+        .from(connectedApps)
+        .where(whereClause)
+        .orderBy(desc(connectedApps.updatedAt))
+        .limit(limit)
+        .offset(offset),
       ctx.db
-        .select({
-          appId: appApiKeys.appId,
-          count: sql<number>`cast(count(*) as integer)`,
-        })
-        .from(appApiKeys)
-        .where(eq(appApiKeys.isActive, true))
-        .groupBy(appApiKeys.appId),
+        .select({ count: sql<number>`cast(count(*) as integer)` })
+        .from(connectedApps)
+        .where(whereClause),
     ]);
+
+    const pageAppIds = apps.map((a) => a.id);
+    const [userCounts, keyCounts] =
+      pageAppIds.length > 0
+        ? await Promise.all([
+            ctx.db
+              .select({
+                appId: appUsers.appId,
+                count: sql<number>`cast(count(*) as integer)`,
+              })
+              .from(appUsers)
+              .where(inArray(appUsers.appId, pageAppIds))
+              .groupBy(appUsers.appId),
+            ctx.db
+              .select({
+                appId: appApiKeys.appId,
+                count: sql<number>`cast(count(*) as integer)`,
+              })
+              .from(appApiKeys)
+              .where(and(inArray(appApiKeys.appId, pageAppIds), eq(appApiKeys.isActive, true)))
+              .groupBy(appApiKeys.appId),
+          ])
+        : [[], []];
 
     const userCountMap = new Map(userCounts.map((r) => [r.appId, Number(r.count)]));
     const keyCountMap = new Map(keyCounts.map((r) => [r.appId, Number(r.count)]));
+    const total = Number(totalRows[0]?.count ?? 0);
 
     return jsonResponse({
       data: apps.map((a) => ({
-        ...a,
-        webhookSecret: undefined,
-        hasWebhookSecret: Boolean(a.webhookSecret),
+        ...formatAppRecord(a),
         endUsersCount: userCountMap.get(a.id) ?? 0,
         activeKeysCount: keyCountMap.get(a.id) ?? 0,
       })),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
     });
   });
 
-  router.post('/api/apps', async (ctx: WorkerContext) => {
-    const permFail = await requirePermission(ctx, 'apps.manage');
-    if (permFail) return permFail;
-
-    const body = await readJsonBody<{
+  async function createAndProvisionConnectedApp(
+    ctx: WorkerContext,
+    body: {
       name?: string;
+      app_name?: string;
+      appName?: string;
       platform?: string;
       packageName?: string;
       package_name?: string;
       packageOrDomain?: string;
       description?: string;
       currentVersion?: string;
+      version_name?: string;
+      versionName?: string;
+      version_code?: number | string;
+      versionCode?: number | string;
       minSupportedVersion?: string;
       forceUpdate?: boolean;
       admobAppId?: string;
       adsEnabled?: boolean;
+      firebase_project_id?: string;
+      firebaseProjectId?: string;
+      firebase_app_id?: string;
+      firebaseAppId?: string;
+      firebase_project_number?: string;
+      firebaseProjectNumber?: string;
+      firebase_storage_bucket?: string;
+      firebaseStorageBucket?: string;
+      connection_config?: string | Record<string, unknown>;
+      connectionConfig?: string | Record<string, unknown>;
       maintenanceMessage?: string;
       createInitialKey?: boolean;
       initialKeyName?: string;
@@ -590,11 +775,53 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
         description?: string;
         fields?: CollectionFieldSpec[];
       }>;
-    }>(ctx.request);
+    }
+  ): Promise<
+    | {
+        ok: true;
+        status: 201;
+        payload: {
+          app: ReturnType<typeof formatAppRecord>;
+          initialApiKey: string | null;
+          initialKeyRecord: Record<string, unknown> | null;
+          provisionedCollections: Array<{ id: number; slug: string; name: string }>;
+        };
+      }
+    | { ok: false; response: Response; conflictPkg?: string }
+  > {
+    const connCheck = sanitizeConnectionConfig(body.connection_config ?? body.connectionConfig);
+    if (connCheck.error) {
+      return { ok: false, response: errorResponse(400, connCheck.error) };
+    }
 
-    const name = sanitizeText(body.name, 120);
+    const fbProjCheck = validateFirebaseProjectId(
+      body.firebase_project_id ?? body.firebaseProjectId ?? connCheck.value.firebase_project_id
+    );
+    if (fbProjCheck.error) {
+      return { ok: false, response: errorResponse(400, fbProjCheck.error) };
+    }
+    const fbAppCheck = validateFirebaseAppId(
+      body.firebase_app_id ?? body.firebaseAppId ?? connCheck.value.firebase_app_id
+    );
+    if (fbAppCheck.error) {
+      return { ok: false, response: errorResponse(400, fbAppCheck.error) };
+    }
+    const fbNumCheck = validateFirebaseProjectNumber(
+      body.firebase_project_number ?? body.firebaseProjectNumber ?? connCheck.value.firebase_project_number
+    );
+    if (fbNumCheck.error) {
+      return { ok: false, response: errorResponse(400, fbNumCheck.error) };
+    }
+    const fbBucketCheck = validateFirebaseStorageBucket(
+      body.firebase_storage_bucket ?? body.firebaseStorageBucket ?? connCheck.value.firebase_storage_bucket
+    );
+    if (fbBucketCheck.error) {
+      return { ok: false, response: errorResponse(400, fbBucketCheck.error) };
+    }
+
+    const name = sanitizeText(body.app_name ?? body.appName ?? body.name, 120);
     if (!name) {
-      return errorResponse(400, 'Application name is required.');
+      return { ok: false, response: errorResponse(400, 'Application name (app_name) is required.') };
     }
 
     const pkgResolved = derivePackageNameFromInput(
@@ -602,8 +829,23 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       body.packageOrDomain
     );
     if (pkgResolved.error) {
-      return errorResponse(400, pkgResolved.error);
+      return { ok: false, response: errorResponse(400, pkgResolved.error) };
     }
+
+    const platform = VALID_PLATFORMS.includes((body.platform || '') as (typeof VALID_PLATFORMS)[number])
+      ? (body.platform as string)
+      : 'android';
+
+    if (platform === 'android' && !pkgResolved.packageName) {
+      return {
+        ok: false,
+        response: errorResponse(
+          400,
+          'Valid reverse-DNS package_name (e.g. com.company.myapp) is required for Android apps.'
+        ),
+      };
+    }
+
     if (pkgResolved.packageName) {
       const dupPkg = await ctx.db
         .select({ id: connectedApps.id, appUid: connectedApps.appUid })
@@ -611,17 +853,26 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
         .where(sql`lower(${connectedApps.packageName}) = ${pkgResolved.packageName}`)
         .limit(1);
       if (dupPkg[0]) {
-        return errorResponse(409, `An application with package_name "${pkgResolved.packageName}" already exists.`, {
-          code: 'PACKAGE_NAME_CONFLICT',
-          package_name: pkgResolved.packageName,
-          existingAppId: dupPkg[0].id,
-        });
+        return {
+          ok: false,
+          conflictPkg: pkgResolved.packageName,
+          response: errorResponse(
+            409,
+            `An application with package_name "${pkgResolved.packageName}" already exists.`,
+            {
+              code: 'PACKAGE_NAME_CONFLICT',
+              package_name: pkgResolved.packageName,
+              existingAppId: dupPkg[0].id,
+            }
+          ),
+        };
       }
     }
 
-    const platform = VALID_PLATFORMS.includes((body.platform || '') as (typeof VALID_PLATFORMS)[number])
-      ? (body.platform as string)
-      : 'android';
+    const versionName =
+      sanitizeText(body.version_name ?? body.versionName ?? body.currentVersion ?? '1.0.0', 40) || '1.0.0';
+    const versionCode = parseVersionCode(body.version_code ?? body.versionCode, 1);
+
     const baseSlug = slugify(name) || `app-${Date.now()}`;
     const existingSlug = await ctx.db
       .select({ id: connectedApps.id })
@@ -633,10 +884,15 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
     const webhookSecret = `whsec_${generateSessionToken().slice(0, 32)}`;
     const backendNamespace = buildBackendNamespace(slug, appUid);
 
+    const effectiveBackendUrl = sanitizeText(
+      body.backendBaseUrl || connCheck.value.sync_url || '',
+      300
+    );
+    const requestedSyncMode = body.integrationMode || connCheck.value.sync_mode;
     const integrationMode: IntegrationMode =
-      body.integrationMode === 'external_backend' || body.integrationMode === 'hybrid'
-        ? body.integrationMode
-        : body.backendBaseUrl
+      requestedSyncMode === 'external_backend' || requestedSyncMode === 'hybrid'
+        ? requestedSyncMode
+        : effectiveBackendUrl
           ? 'hybrid'
           : 'aegis_managed';
 
@@ -645,7 +901,7 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       platform,
       packageOrDomain: pkgResolved.packageOrDomain,
       integrationMode,
-      backendBaseUrl: sanitizeText(body.backendBaseUrl, 300),
+      backendBaseUrl: effectiveBackendUrl,
       manifestUrl: sanitizeText(body.manifestUrl, 300),
       modelsText: typeof body.modelsText === 'string' ? body.modelsText.slice(0, 6000) : '',
     });
@@ -672,6 +928,22 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
           ? 'verified'
           : 'partial';
 
+    const settingsJson = withConnectionSettings(
+      {},
+      {
+        versionCode,
+        connectionConfig: {
+          ...connCheck.value,
+          firebase_project_id: fbProjCheck.value || undefined,
+          firebase_app_id: fbAppCheck.value || undefined,
+          firebase_project_number: fbNumCheck.value || undefined,
+          firebase_storage_bucket: fbBucketCheck.value || undefined,
+          sync_mode: integrationMode,
+          sync_url: effectiveBackendUrl || connCheck.value.sync_url,
+        },
+      }
+    );
+
     const created = await ctx.db
       .insert(connectedApps)
       .values({
@@ -683,7 +955,7 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
         packageOrDomain: pkgResolved.packageOrDomain,
         description: sanitizeText(body.description, 500),
         status: 'connected',
-        currentVersion: sanitizeText(body.currentVersion || '1.0.0', 40) || '1.0.0',
+        currentVersion: versionName,
         minSupportedVersion: sanitizeText(body.minSupportedVersion || '1.0.0', 40) || '1.0.0',
         forceUpdate: Boolean(body.forceUpdate),
         maintenanceMessage:
@@ -694,11 +966,12 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
         healthStatus: 'healthy',
         backendNamespace,
         integrationMode,
-        backendBaseUrl: sanitizeText(body.backendBaseUrl, 300),
+        backendBaseUrl: effectiveBackendUrl,
         manifestUrl: sanitizeText(body.manifestUrl, 300),
         discoveredCapabilities: finalCapabilities,
         enabledModules: finalEnabledModules,
         syncStatus,
+        settingsJson,
         createdBy: ctx.adminUser!.id,
       })
       .returning();
@@ -720,7 +993,6 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       .onConflictDoNothing()
       .catch(() => {});
 
-    // Provision isolated collections and custom module bindings for the new app
     const collectionsToProvision =
       Array.isArray(body.proposedCollections) && body.proposedCollections.length > 0
         ? body.proposedCollections
@@ -813,6 +1085,9 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       details: {
         appUid: app.appUid,
         name: app.name,
+        package_name: app.packageName,
+        version_name: app.currentVersion,
+        version_code: versionCode,
         platform: app.platform,
         backendNamespace,
         integrationMode,
@@ -822,12 +1097,91 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       userAgent: ctx.userAgent,
     });
 
-    return jsonResponse(
-      {
-        app: { ...app, webhookSecret: undefined },
+    return {
+      ok: true,
+      status: 201,
+      payload: {
+        app: formatAppRecord(app),
         initialApiKey,
         initialKeyRecord,
         provisionedCollections,
+      },
+    };
+  }
+
+  router.post('/api/apps', async (ctx: WorkerContext) => {
+    const permFail = await requirePermission(ctx, 'apps.manage');
+    if (permFail) return permFail;
+
+    const body = await readJsonBody<Record<string, unknown>>(ctx.request);
+    const result = await createAndProvisionConnectedApp(ctx, body as never);
+    if (!result.ok) return result.response;
+    return jsonResponse(result.payload, result.status);
+  });
+
+  // Reusable Quick JSON Connect endpoint (accepts Connection JSON or google-services.json)
+  router.post('/api/apps/quick-connect', async (ctx: WorkerContext) => {
+    const permFail = await requirePermission(ctx, 'apps.manage');
+    if (permFail) return permFail;
+
+    const rawBody = await readJsonBody<Record<string, unknown>>(ctx.request);
+    const payloadInput =
+      typeof rawBody.json === 'string'
+        ? rawBody.json
+        : rawBody.json && typeof rawBody.json === 'object'
+          ? JSON.stringify(rawBody.json)
+          : JSON.stringify(rawBody);
+
+    const parsed = parseQuickConnectJson(payloadInput);
+    if (parsed.error || !parsed.apps) {
+      return errorResponse(400, parsed.error || 'Could not parse Quick Connect JSON.');
+    }
+
+    const connected: Array<{
+      app: ReturnType<typeof formatAppRecord>;
+      initialApiKey: string | null;
+      provisionedCollections: Array<{ id: number; slug: string; name: string }>;
+    }> = [];
+    const conflicts: Array<{ package_name: string; error: string }> = [];
+
+    for (const candidate of parsed.apps) {
+      const res = await createAndProvisionConnectedApp(ctx, {
+        app_name: candidate.app_name,
+        package_name: candidate.package_name,
+        version_name: candidate.version_name,
+        version_code: candidate.version_code,
+        platform: candidate.platform,
+        connection_config: candidate.connection_config,
+      });
+      if (res.ok) {
+        connected.push({
+          app: res.payload.app,
+          initialApiKey: res.payload.initialApiKey,
+          provisionedCollections: res.payload.provisionedCollections,
+        });
+      } else if (res.conflictPkg) {
+        conflicts.push({
+          package_name: res.conflictPkg,
+          error: `package_name "${res.conflictPkg}" is already registered.`,
+        });
+      } else {
+        return res.response;
+      }
+    }
+
+    if (connected.length === 0 && conflicts.length > 0) {
+      return errorResponse(409, conflicts[0].error, {
+        code: 'PACKAGE_NAME_CONFLICT',
+        conflicts,
+      });
+    }
+
+    return jsonResponse(
+      {
+        sourceFormat: parsed.sourceFormat,
+        connectedCount: connected.length,
+        connected,
+        conflicts,
       },
       201
     );
@@ -882,7 +1236,7 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       ]);
 
     return jsonResponse({
-      app: { ...app, webhookSecret: undefined },
+      app: formatAppRecord(app),
       stats: {
         endUsersCount: Number(endUsersCount[0]?.c ?? 0),
         activeUsersCount: Number(activeUsersCount[0]?.c ?? 0),
@@ -907,6 +1261,8 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
 
     const body = await readJsonBody<{
       name?: string;
+      app_name?: string;
+      appName?: string;
       platform?: string;
       packageName?: string;
       package_name?: string;
@@ -914,11 +1270,25 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       description?: string;
       status?: string;
       currentVersion?: string;
+      version_name?: string;
+      versionName?: string;
+      version_code?: number | string;
+      versionCode?: number | string;
       minSupportedVersion?: string;
       forceUpdate?: boolean;
       maintenanceMessage?: string;
       admobAppId?: string;
       adsEnabled?: boolean;
+      firebase_project_id?: string;
+      firebaseProjectId?: string;
+      firebase_app_id?: string;
+      firebaseAppId?: string;
+      firebase_project_number?: string;
+      firebaseProjectNumber?: string;
+      firebase_storage_bucket?: string;
+      firebaseStorageBucket?: string;
+      connection_config?: string | Record<string, unknown>;
+      connectionConfig?: string | Record<string, unknown>;
       healthStatus?: string;
       integrationMode?: string;
       backendBaseUrl?: string;
@@ -927,6 +1297,44 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       settingsJson?: Record<string, unknown>;
       rotateWebhookSecret?: boolean;
     }>(ctx.request);
+
+    const patchConnCheck = sanitizeConnectionConfig(body.connection_config ?? body.connectionConfig);
+    if (patchConnCheck.error) {
+      return errorResponse(400, patchConnCheck.error);
+    }
+
+    const patchFbProjectRaw =
+      body.firebase_project_id ?? body.firebaseProjectId ?? patchConnCheck.value.firebase_project_id;
+    const patchFbAppRaw =
+      body.firebase_app_id ?? body.firebaseAppId ?? patchConnCheck.value.firebase_app_id;
+    const patchFbNumRaw =
+      body.firebase_project_number ??
+      body.firebaseProjectNumber ??
+      patchConnCheck.value.firebase_project_number;
+    const patchFbBucketRaw =
+      body.firebase_storage_bucket ??
+      body.firebaseStorageBucket ??
+      patchConnCheck.value.firebase_storage_bucket;
+    const patchFbProject =
+      patchFbProjectRaw !== undefined ? validateFirebaseProjectId(patchFbProjectRaw) : null;
+    if (patchFbProject?.error) {
+      return errorResponse(400, patchFbProject.error);
+    }
+    const patchFbApp =
+      patchFbAppRaw !== undefined ? validateFirebaseAppId(patchFbAppRaw) : null;
+    if (patchFbApp?.error) {
+      return errorResponse(400, patchFbApp.error);
+    }
+    const patchFbNum =
+      patchFbNumRaw !== undefined ? validateFirebaseProjectNumber(patchFbNumRaw) : null;
+    if (patchFbNum?.error) {
+      return errorResponse(400, patchFbNum.error);
+    }
+    const patchFbBucket =
+      patchFbBucketRaw !== undefined ? validateFirebaseStorageBucket(patchFbBucketRaw) : null;
+    if (patchFbBucket?.error) {
+      return errorResponse(400, patchFbBucket.error);
+    }
 
     let nextPackageName = existing.packageName;
     let nextPackageOrDomain =
@@ -974,8 +1382,9 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       ? (body.platform as string)
       : existing.platform;
 
-    const nextIntegrationMode = ['aegis_managed', 'external_backend', 'hybrid'].includes(body.integrationMode || '')
-      ? (body.integrationMode as string)
+    const requestedMode = body.integrationMode || patchConnCheck.value.sync_mode;
+    const nextIntegrationMode = ['aegis_managed', 'external_backend', 'hybrid'].includes(requestedMode || '')
+      ? (requestedMode as string)
       : existing.integrationMode;
 
     const nextMaintenanceMessage =
@@ -983,10 +1392,18 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
         ? sanitizeText(body.maintenanceMessage, 300)
         : existing.maintenanceMessage;
 
+    const nextName =
+      body.app_name !== undefined || body.appName !== undefined || body.name !== undefined
+        ? sanitizeText(body.app_name ?? body.appName ?? body.name, 120) || existing.name
+        : existing.name;
+
+    const nextVersionRaw = body.version_name ?? body.versionName ?? body.currentVersion;
+    const nextVersionCodeRaw = body.version_code ?? body.versionCode;
+
     const updated = await ctx.db
       .update(connectedApps)
       .set({
-        name: body.name !== undefined ? sanitizeText(body.name, 120) || existing.name : existing.name,
+        name: nextName,
         platform: nextPlatform,
         packageName: nextPackageName,
         packageOrDomain: nextPackageOrDomain,
@@ -994,8 +1411,8 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
           body.description !== undefined ? sanitizeText(body.description, 500) : existing.description,
         status: nextStatus,
         currentVersion:
-          body.currentVersion !== undefined
-            ? sanitizeText(body.currentVersion, 40) || existing.currentVersion
+          nextVersionRaw !== undefined
+            ? sanitizeText(nextVersionRaw, 40) || existing.currentVersion
             : existing.currentVersion,
         minSupportedVersion:
           body.minSupportedVersion !== undefined
@@ -1012,16 +1429,34 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
           : existing.healthStatus,
         integrationMode: nextIntegrationMode,
         backendBaseUrl:
-          body.backendBaseUrl !== undefined ? sanitizeText(body.backendBaseUrl, 300) : existing.backendBaseUrl,
+          body.backendBaseUrl !== undefined
+            ? sanitizeText(body.backendBaseUrl, 300)
+            : patchConnCheck.value.sync_url !== undefined
+              ? patchConnCheck.value.sync_url
+              : existing.backendBaseUrl,
         manifestUrl:
           body.manifestUrl !== undefined ? sanitizeText(body.manifestUrl, 300) : existing.manifestUrl,
         enabledModules: Array.isArray(body.enabledModules)
           ? body.enabledModules.map((m) => sanitizeText(m, 50)).filter(Boolean)
           : existing.enabledModules,
-        settingsJson:
+        settingsJson: withConnectionSettings(
           body.settingsJson && typeof body.settingsJson === 'object'
             ? body.settingsJson
             : existing.settingsJson,
+          {
+            versionCode:
+              nextVersionCodeRaw !== undefined
+                ? parseVersionCode(nextVersionCodeRaw, extractAppVersionCode(existing.settingsJson))
+                : undefined,
+            connectionConfig: {
+              ...patchConnCheck.value,
+              firebase_project_id: patchFbProject ? patchFbProject.value : undefined,
+              firebase_app_id: patchFbApp ? patchFbApp.value : undefined,
+              firebase_project_number: patchFbNum ? patchFbNum.value : undefined,
+              firebase_storage_bucket: patchFbBucket ? patchFbBucket.value : undefined,
+            },
+          }
+        ),
         webhookSecret: body.rotateWebhookSecret
           ? `whsec_${generateSessionToken().slice(0, 32)}`
           : existing.webhookSecret,
@@ -1090,7 +1525,9 @@ export function registerMultiAppAndSdkRoutes(router: WorkerRouter): void {
       );
     }
 
-    return jsonResponse({ app: { ...updated[0], webhookSecret: undefined } });
+    return jsonResponse({
+      app: formatAppRecord(updated[0]),
+    });
   });
 
   router.delete('/api/apps/:id', async (ctx: WorkerContext) => {

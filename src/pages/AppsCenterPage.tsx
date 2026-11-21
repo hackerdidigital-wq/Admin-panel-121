@@ -19,11 +19,16 @@ import {
   Webhook,
   Zap,
 } from 'lucide-react';
+import { ConnectAppModal } from '../components/apps/ConnectAppModal';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { useToast } from '../components/common/Toast';
 import { useAppScope, type ConnectedAppRecord } from '../contexts/AppScopeContext';
 import { useAuth } from '../contexts/AuthContext';
 import { apiRequest, downloadWithAuth } from '../lib/api';
+import {
+  parseQuickConnectJson,
+  type QuickConnectAppCandidate,
+} from '../lib/packageSync';
 
 interface OverviewResponse {
   summary: {
@@ -37,6 +42,12 @@ interface OverviewResponse {
     totalRevenueCents: number;
     totalAdRevenueCents: number;
     errors24h: number;
+  };
+  pagination?: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
   };
   apps: Array<
     ConnectedAppRecord & {
@@ -240,13 +251,23 @@ export const AppsCenterPage: React.FC<{
   const [dirLoading, setDirLoading] = useState(true);
   const [dirSearch, setDirSearch] = useState('');
   const [dirPlatform, setDirPlatform] = useState('all');
+  const [dirPage, setDirPage] = useState(1);
+  const [showConnectModal, setShowConnectModal] = useState(false);
   const [editingApp, setEditingApp] = useState<ConnectedAppRecord | null>(null);
   const [deleteAppTarget, setDeleteAppTarget] = useState<ConnectedAppRecord | null>(null);
 
   const loadOverview = useCallback(async () => {
     setDirLoading(true);
     try {
-      const res = await apiRequest<OverviewResponse>('/apps/overview');
+      const qs = new URLSearchParams({
+        page: String(dirPage),
+        limit: '25',
+        platform: dirPlatform,
+      });
+      if (dirSearch.trim()) {
+        qs.set('search', dirSearch.trim());
+      }
+      const res = await apiRequest<OverviewResponse>(`/apps/overview?${qs.toString()}`);
       setOverview(res);
     } catch (err) {
       pushToast({
@@ -257,7 +278,7 @@ export const AppsCenterPage: React.FC<{
     } finally {
       setDirLoading(false);
     }
-  }, [pushToast]);
+  }, [dirPage, dirPlatform, dirSearch, pushToast]);
 
   // ---- Connect App & SDK State ----
   const [newName, setNewName] = useState('');
@@ -265,8 +286,20 @@ export const AppsCenterPage: React.FC<{
   const [newPkg, setNewPkg] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [newVersion, setNewVersion] = useState('1.0.0');
+  const [newVersionCode, setNewVersionCode] = useState('1');
   const [newMinVersion, setNewMinVersion] = useState('1.0.0');
   const [newAdmobId, setNewAdmobId] = useState('');
+  const [newFirebaseProjectId, setNewFirebaseProjectId] = useState('');
+  const [newFirebaseAppId, setNewFirebaseAppId] = useState('');
+  const [newFirebaseProjectNumber, setNewFirebaseProjectNumber] = useState('');
+  const [newFirebaseStorageBucket, setNewFirebaseStorageBucket] = useState('');
+  const [showGsImporter, setShowGsImporter] = useState(false);
+  const [gsRawJson, setGsRawJson] = useState('');
+  const [gsParsed, setGsParsed] = useState<{
+    sourceFormat: 'connection_json' | 'google_services_json';
+    apps: QuickConnectAppCandidate[];
+  } | null>(null);
+  const [gsParseError, setGsParseError] = useState<string | null>(null);
   const [newKeyName, setNewKeyName] = useState('Primary Production Key');
   const [newScopes, setNewScopes] = useState<string[]>([...KEY_SCOPE_OPTIONS]);
   const [integrationMode, setIntegrationMode] = useState<'aegis_managed' | 'hybrid' | 'external_backend'>('aegis_managed');
@@ -537,20 +570,30 @@ export const AppsCenterPage: React.FC<{
       try {
         const trimmedPkg = newPkg.trim();
         const isUrl = trimmedPkg.includes('://');
+        const parsedCode = Math.max(1, Math.floor(Number(newVersionCode) || 1));
         const res = await apiRequest<{
           app: ConnectedAppRecord;
           initialApiKey: string | null;
         }>('/apps', {
           method: 'POST',
           body: JSON.stringify({
-            name: newName,
+            app_name: newName,
             platform: newPlatform,
-            packageName: !isUrl && trimmedPkg ? trimmedPkg : undefined,
+            package_name: !isUrl && trimmedPkg ? trimmedPkg : undefined,
             packageOrDomain: trimmedPkg,
             description: newDesc,
-            currentVersion: newVersion,
+            version_name: newVersion,
+            version_code: parsedCode,
             minSupportedVersion: newMinVersion,
             admobAppId: newAdmobId,
+            connection_config: {
+              firebase_project_id: newFirebaseProjectId.trim() || undefined,
+              firebase_app_id: newFirebaseAppId.trim() || undefined,
+              firebase_project_number: newFirebaseProjectNumber.trim() || undefined,
+              firebase_storage_bucket: newFirebaseStorageBucket.trim() || undefined,
+              sync_mode: integrationMode,
+              sync_url: backendBaseUrl.trim() || undefined,
+            },
             initialKeyName: newKeyName,
             scopes: newScopes,
             createInitialKey: true,
@@ -570,7 +613,13 @@ export const AppsCenterPage: React.FC<{
         setNewName('');
         setNewPkg('');
         setNewDesc('');
+        setNewVersion('1.0.0');
+        setNewVersionCode('1');
         setNewAdmobId('');
+        setNewFirebaseProjectId('');
+        setNewFirebaseAppId('');
+        setNewFirebaseProjectNumber('');
+        setNewFirebaseStorageBucket('');
         setBackendBaseUrl('');
         setManifestUrl('');
         setModelsText('');
@@ -718,58 +767,58 @@ export const AppsCenterPage: React.FC<{
             className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 lg:col-span-6 dark:border-slate-800 dark:bg-slate-900"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="font-display text-sm font-semibold">01. Register & Inspect Application</h2>
-              <span className="text-[11px] text-slate-500">1-Click Blueprints</span>
+              <h2 className="font-display text-sm font-semibold">01. Register &amp; Inspect Application</h2>
+              <span className="text-[11px] text-slate-500">Starter Templates</span>
             </div>
             <div className="flex flex-wrap gap-1.5">
               {[
                 {
-                  id: 'shayari',
-                  label: 'Shayari App',
-                  name: 'ShayariVerse App',
+                  id: 'android',
+                  label: 'Android App',
+                  name: 'My Android App',
                   platform: 'android',
-                  pkg: 'com.aegis.shayariverse',
+                  pkg: 'com.company.myapp',
+                  models: '',
+                },
+                {
+                  id: 'content-app',
+                  label: 'Content / Shayari App',
+                  name: 'Editorial Content App',
+                  platform: 'android',
+                  pkg: 'com.company.contentapp',
                   models:
                     'shayari(title:text, shayari_text:text, author:text, category:text, published:boolean); shayari_categories(name:text, slug:text, active:boolean)',
                 },
                 {
                   id: 'unity',
                   label: 'Unity 3D Game',
-                  name: 'Unity Strike 3D',
+                  name: 'Unity Game Client',
                   platform: 'unity',
-                  pkg: 'com.studio.unitystrike',
+                  pkg: 'com.studio.unitygame',
                   models: '',
                 },
                 {
                   id: 'br',
-                  label: 'Battle Royale Game',
-                  name: 'Apex RoyaleArena',
+                  label: 'Multiplayer Game',
+                  name: 'Multiplayer Arena',
                   platform: 'game',
-                  pkg: 'com.studio.apexroyale',
-                  models: '',
-                },
-                {
-                  id: 'android',
-                  label: 'Android App',
-                  name: 'Candy Mind Match',
-                  platform: 'android',
-                  pkg: 'com.cyberking.candymindmatch',
+                  pkg: 'com.studio.arenagame',
                   models: '',
                 },
                 {
                   id: 'website',
                   label: 'Website / CMS',
-                  name: 'Nova Web Portal',
+                  name: 'Web Portal',
                   platform: 'website',
-                  pkg: 'https://nova.example.com',
+                  pkg: 'https://app.example.com',
                   models: '',
                 },
                 {
                   id: 'ios',
                   label: 'iOS App',
-                  name: 'Pulse iOS App',
+                  name: 'iOS Client',
                   platform: 'ios',
-                  pkg: 'com.studio.pulseios',
+                  pkg: 'com.company.iosapp',
                   models: '',
                 },
                 {
@@ -788,7 +837,13 @@ export const AppsCenterPage: React.FC<{
                     setNewName(bp.name);
                     setNewPlatform(bp.platform);
                     setNewPkg(bp.pkg);
+                    setNewVersion('1.0.0');
+                    setNewVersionCode('1');
                     setModelsText(bp.models);
+                    setNewFirebaseProjectId('');
+                    setNewFirebaseAppId('');
+                    setNewFirebaseProjectNumber('');
+                    setNewFirebaseStorageBucket('');
                     setIntegrationMode('aegis_managed');
                     setInspectReport(null);
                     setInspectSnippets(null);
@@ -798,6 +853,83 @@ export const AppsCenterPage: React.FC<{
                   {bp.label}
                 </button>
               ))}
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 text-xs dark:border-slate-800 dark:bg-slate-950/50">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium text-slate-800 dark:text-slate-200">
+                  Quick JSON Connect / Import (<code className="font-mono">Connection JSON</code> or{' '}
+                  <code className="font-mono">google-services.json</code>)
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowGsImporter((prev) => !prev)}
+                  className="rounded border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                >
+                  {showGsImporter ? 'Hide JSON Importer' : 'Paste Quick JSON'}
+                </button>
+              </div>
+              {showGsImporter && (
+                <div className="mt-2.5 space-y-2">
+                  <textarea
+                    rows={3}
+                    value={gsRawJson}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setGsRawJson(val);
+                      if (!val.trim()) {
+                        setGsParsed(null);
+                        setGsParseError(null);
+                        return;
+                      }
+                      const res = parseQuickConnectJson(val);
+                      if (res.error || !res.apps || !res.sourceFormat) {
+                        setGsParsed(null);
+                        setGsParseError(res.error || 'Could not parse JSON.');
+                      } else {
+                        setGsParsed({ sourceFormat: res.sourceFormat, apps: res.apps });
+                        setGsParseError(null);
+                      }
+                    }}
+                    placeholder='Paste {"app_name","package_name","version_name","version_code","connection_config"} or google-services.json — secrets & API keys are never persisted.'
+                    aria-label="Paste Quick Connect JSON or google-services.json"
+                    className="w-full rounded-lg border border-slate-200 bg-white p-2 font-mono text-[11px] dark:border-slate-700 dark:bg-slate-900"
+                  />
+                  {gsParseError && <p className="text-[11px] text-red-600">{gsParseError}</p>}
+                  {gsParsed && (
+                    <div className="space-y-1.5">
+                      <p className="font-mono text-[11px] text-slate-600 dark:text-slate-400">
+                        Parsed {gsParsed.apps.length} app(s) from {gsParsed.sourceFormat}
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {gsParsed.apps.map((cl) => (
+                          <button
+                            key={cl.package_name}
+                            type="button"
+                            onClick={() => {
+                              setNewName(cl.app_name);
+                              setNewPlatform(cl.platform);
+                              setNewPkg(cl.package_name);
+                              setNewVersion(cl.version_name);
+                              setNewVersionCode(String(cl.version_code));
+                              setNewFirebaseProjectId(cl.connection_config.firebase_project_id || '');
+                              setNewFirebaseAppId(cl.connection_config.firebase_app_id || '');
+                              setNewFirebaseProjectNumber(cl.connection_config.firebase_project_number || '');
+                              setNewFirebaseStorageBucket(cl.connection_config.firebase_storage_bucket || '');
+                              pushToast({
+                                type: 'success',
+                                title: `Prefilled ${cl.package_name}`,
+                              });
+                            }}
+                            className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 font-mono text-[11px] font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300"
+                          >
+                            Prefill {cl.package_name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="grid gap-3 sm:grid-cols-2 text-xs">
               <div>
@@ -856,18 +988,31 @@ export const AppsCenterPage: React.FC<{
                   id="connect-app-pkg"
                   value={newPkg}
                   onChange={(e) => setNewPkg(e.target.value)}
-                  placeholder="com.cyberking.candymindmatch or app.example.com"
+                  placeholder="com.company.myapp or app.example.com"
                   className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
                 />
               </div>
               <div>
                 <label htmlFor="connect-app-ver" className="block font-medium">
-                  Current Version
+                  Version Name (version_name)
                 </label>
                 <input
                   id="connect-app-ver"
                   value={newVersion}
                   onChange={(e) => setNewVersion(e.target.value)}
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
+              <div>
+                <label htmlFor="connect-app-vercode" className="block font-medium">
+                  Version Code (version_code)
+                </label>
+                <input
+                  id="connect-app-vercode"
+                  type="number"
+                  min={1}
+                  value={newVersionCode}
+                  onChange={(e) => setNewVersionCode(e.target.value)}
                   className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
                 />
               </div>
@@ -879,6 +1024,54 @@ export const AppsCenterPage: React.FC<{
                   id="connect-app-minver"
                   value={newMinVersion}
                   onChange={(e) => setNewMinVersion(e.target.value)}
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
+              <div>
+                <label htmlFor="connect-fb-project" className="block font-medium">
+                  Firebase Project ID (optional)
+                </label>
+                <input
+                  id="connect-fb-project"
+                  value={newFirebaseProjectId}
+                  onChange={(e) => setNewFirebaseProjectId(e.target.value)}
+                  placeholder="my-firebase-project"
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
+              <div>
+                <label htmlFor="connect-fb-app" className="block font-medium">
+                  Firebase App ID (optional)
+                </label>
+                <input
+                  id="connect-fb-app"
+                  value={newFirebaseAppId}
+                  onChange={(e) => setNewFirebaseAppId(e.target.value)}
+                  placeholder="1:123456789012:android:abc123def456"
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
+              <div>
+                <label htmlFor="connect-fb-num" className="block font-medium">
+                  Firebase Project Number (optional)
+                </label>
+                <input
+                  id="connect-fb-num"
+                  value={newFirebaseProjectNumber}
+                  onChange={(e) => setNewFirebaseProjectNumber(e.target.value)}
+                  placeholder="123456789012"
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
+              <div>
+                <label htmlFor="connect-fb-bucket" className="block font-medium">
+                  Firebase Storage Bucket (optional)
+                </label>
+                <input
+                  id="connect-fb-bucket"
+                  value={newFirebaseStorageBucket}
+                  onChange={(e) => setNewFirebaseStorageBucket(e.target.value)}
+                  placeholder="my-firebase-project.firebasestorage.app"
                   className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
                 />
               </div>
@@ -1032,7 +1225,7 @@ export const AppsCenterPage: React.FC<{
                   id="sdk-test-uid"
                   value={sdkTestAppUid}
                   onChange={(e) => setSdkTestAppUid(e.target.value)}
-                  placeholder="com.cyberking.candymindmatch or app_..."
+                  placeholder="com.company.myapp or app_..."
                   className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
                 />
               </div>
@@ -2139,19 +2332,7 @@ export const AppsCenterPage: React.FC<{
   }
 
   // ---------------- DEFAULT SUBVIEW: CONNECTED APPS DIRECTORY ----------------
-  const filteredApps = (overview?.apps || []).filter((a) => {
-    if (dirPlatform !== 'all' && a.platform !== dirPlatform) return false;
-    if (dirSearch.trim()) {
-      const q = dirSearch.trim().toLowerCase();
-      return (
-        a.name.toLowerCase().includes(q) ||
-        a.appUid.toLowerCase().includes(q) ||
-        (a.packageName || '').toLowerCase().includes(q) ||
-        (a.packageOrDomain || '').toLowerCase().includes(q)
-      );
-    }
-    return true;
-  });
+  const visibleApps = overview?.apps || [];
 
   const handleSaveEditApp = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2162,16 +2343,23 @@ export const AppsCenterPage: React.FC<{
       await apiRequest(`/apps/${editingApp.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
-          name: editingApp.name,
+          app_name: editingApp.name,
           platform: editingApp.platform,
-          packageName: isUrl ? '' : pkgInput,
+          package_name: isUrl ? '' : pkgInput,
           packageOrDomain: editingApp.packageOrDomain || pkgInput,
           status: editingApp.status,
-          currentVersion: editingApp.currentVersion,
+          version_name: editingApp.currentVersion,
+          version_code: editingApp.versionCode ?? 1,
           minSupportedVersion: editingApp.minSupportedVersion,
           forceUpdate: editingApp.forceUpdate,
           admobAppId: editingApp.admobAppId,
           adsEnabled: editingApp.adsEnabled,
+          connection_config: {
+            firebase_project_id: (editingApp.firebaseProjectId || '').trim(),
+            firebase_app_id: (editingApp.firebaseAppId || '').trim(),
+            firebase_project_number: (editingApp.firebaseProjectNumber || '').trim(),
+            firebase_storage_bucket: (editingApp.firebaseStorageBucket || '').trim(),
+          },
           maintenanceMessage: editingApp.maintenanceMessage,
         }),
       });
@@ -2196,18 +2384,28 @@ export const AppsCenterPage: React.FC<{
             Multi-App Management Platform
           </h1>
           <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-            Connect, monitor, isolate, and control unlimited Android apps, games, websites, and services from one unified console.
+            Connect, monitor, isolate, and control unlimited Android apps, games, websites, and services cleanly by <code className="font-mono">package_name</code>.
           </p>
         </div>
         {hasPerm('apps.manage') && (
-          <button
-            type="button"
-            onClick={() => onNavigate('apps-connect')}
-            className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 text-xs font-medium text-white hover:bg-blue-700"
-          >
-            <Plus className="h-4 w-4" />
-            Connect New App
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onNavigate('apps-connect')}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 text-xs font-medium text-slate-800 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+            >
+              <SearchCode className="h-3.5 w-3.5 text-blue-600" />
+              Schema &amp; Spec Wizard
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowConnectModal(true)}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 text-xs font-medium text-white hover:bg-blue-700"
+            >
+              <Plus className="h-4 w-4" />
+              Connect / Register App
+            </button>
+          </div>
         )}
       </div>
 
@@ -2256,8 +2454,11 @@ export const AppsCenterPage: React.FC<{
       <div className="flex flex-wrap items-center gap-2">
         <input
           value={dirSearch}
-          onChange={(e) => setDirSearch(e.target.value)}
-          placeholder="Search app name, App UID, package, or domain..."
+          onChange={(e) => {
+            setDirSearch(e.target.value);
+            setDirPage(1);
+          }}
+          placeholder="Search app name, App UID, package_name, or domain..."
           aria-label="Search connected apps"
           className="h-9 min-w-[220px] flex-1 rounded-lg border border-slate-200 bg-white px-3 text-xs dark:border-slate-700 dark:bg-slate-900"
         />
@@ -2266,7 +2467,10 @@ export const AppsCenterPage: React.FC<{
             <button
               key={plat}
               type="button"
-              onClick={() => setDirPlatform(plat)}
+              onClick={() => {
+                setDirPlatform(plat);
+                setDirPage(1);
+              }}
               className={`rounded-md px-2.5 py-1 text-xs font-medium capitalize ${
                 dirPlatform === plat
                   ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-slate-100'
@@ -2282,160 +2486,189 @@ export const AppsCenterPage: React.FC<{
       {/* Connected Apps List */}
       {dirLoading && !overview ? (
         <div className="h-40 animate-pulse rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900" />
-      ) : filteredApps.length === 0 ? (
+      ) : visibleApps.length === 0 ? (
         <div className="rounded-xl border border-slate-200 bg-white p-10 text-center dark:border-slate-800 dark:bg-slate-900">
           <Activity className="mx-auto h-7 w-7 text-slate-400" />
           <p className="mt-3 font-display text-sm font-semibold text-slate-900 dark:text-slate-100">
-            No Connected Applications Yet
+            {dirSearch || dirPlatform !== 'all' ? 'No Matching Applications Found' : 'No Connected Applications Yet'}
           </p>
           <p className="mt-1 text-xs text-slate-500">
-            Connect your first Android app, Unity game, or website to manage isolated users, custom collections, feature flags, AdMob units, and SDK keys.
+            Connect any Android app, game, or website by unique <code className="font-mono">package_name</code> to manage isolated announcements, remote config, flags, heartbeats, and API keys.
           </p>
           {hasPerm('apps.manage') && (
             <button
               type="button"
-              onClick={() => onNavigate('apps-connect')}
-              className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white"
+              onClick={() => setShowConnectModal(true)}
+              className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700"
             >
               <Plus className="h-4 w-4" />
-              Connect First App
+              Connect / Register App
             </button>
           )}
         </div>
       ) : (
-        <div className="divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
-          {filteredApps.map((app) => {
-            const isScoped = selectedAppId === app.id;
-            return (
-              <div key={app.id} className="flex flex-wrap items-center justify-between gap-4 p-4 text-xs">
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-display text-sm font-semibold text-slate-900 dark:text-slate-100">
-                      {app.name}
-                    </span>
-                    <span className="text-slate-500 capitalize">
-                      {app.platform} · v{app.currentVersion} · {app.status}
-                      {app.syncStatus ? ` · sync:${app.syncStatus}` : ''}
-                    </span>
-                    {isScoped && (
-                      <span className="font-medium text-blue-600 dark:text-blue-400">
-                        · Active Scope
+        <div className="space-y-3">
+          <div className="divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
+            {visibleApps.map((app) => {
+              const isScoped = selectedAppId === app.id;
+              return (
+                <div key={app.id} className="flex flex-wrap items-center justify-between gap-4 p-4 text-xs">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-display text-sm font-semibold text-slate-900 dark:text-slate-100">
+                        {app.name}
                       </span>
-                    )}
+                      <span className="text-slate-500 capitalize">
+                        {app.platform} · v{app.currentVersion} (code {app.versionCode ?? 1}) · {app.status}
+                        {app.syncStatus ? ` · sync:${app.syncStatus}` : ''}
+                      </span>
+                      {isScoped && (
+                        <span className="font-medium text-blue-600 dark:text-blue-400">
+                          · Active Scope
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1 font-mono text-[11px] text-slate-500">
+                      {(app.packageName || app.packageOrDomain) ? `${app.packageName || app.packageOrDomain} · ` : ''}
+                      {app.firebaseProjectId ? `fb:${app.firebaseProjectId} · ` : ''}
+                      {app.appUid} {app.backendNamespace ? `· ${app.backendNamespace}` : ''} ·{' '}
+                      {app.stats.totalUsers} users ({app.stats.bannedUsers} banned) · {app.stats.activeKeysCount} active keys ·{' '}
+                      Ads ${(app.stats.adRevenueCents / 100).toFixed(2)} · {app.stats.errors24h} errors
+                    </p>
                   </div>
-                  <p className="mt-1 font-mono text-[11px] text-slate-500">
-                    {(app.packageName || app.packageOrDomain) ? `${app.packageName || app.packageOrDomain} · ` : ''}
-                    {app.appUid} {app.backendNamespace ? `· ${app.backendNamespace}` : ''} ·{' '}
-                    {app.stats.totalUsers} users ({app.stats.bannedUsers} banned) · {app.stats.activeKeysCount} active keys ·{' '}
-                    Ads ${(app.stats.adRevenueCents / 100).toFixed(2)} · {app.stats.errors24h} errors
-                  </p>
-                </div>
 
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => onNavigate(`app-workspace:${app.id}`)}
-                    className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2.5 py-1.5 font-medium text-white hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500"
-                  >
-                    <Terminal className="h-3.5 w-3.5" />
-                    Open App Console
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedAppId(isScoped ? 'all' : app.id);
-                      pushToast({
-                        type: 'info',
-                        title: isScoped ? 'Switched workspace to All Apps' : `Workspace scoped to ${app.name}`,
-                      });
-                    }}
-                    className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 font-medium ${
-                      isScoped
-                        ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500 dark:bg-blue-950/40 dark:text-blue-300'
-                        : 'border-slate-200 hover:bg-slate-50 dark:border-slate-700'
-                    }`}
-                  >
-                    <Layers className="h-3.5 w-3.5" />
-                    {isScoped ? 'Clear Scope' : 'Scope App'}
-                  </button>
-
-                  {hasPerm('apps.manage') && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          const nextStatus = app.status === 'connected' ? 'disconnected' : 'connected';
-                          await apiRequest(`/apps/${app.id}`, {
-                            method: 'PATCH',
-                            body: JSON.stringify({ status: nextStatus }),
-                          });
-                          pushToast({ type: 'success', title: `${app.name} is now ${nextStatus}` });
-                          await loadOverview();
-                          await refreshApps();
-                        }}
-                        className="rounded-lg border border-slate-200 px-2.5 py-1.5 hover:bg-slate-50 dark:border-slate-700"
-                      >
-                        {app.status === 'connected' ? 'Disconnect' : 'Connect'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingApp(app)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 hover:bg-slate-50 dark:border-slate-700"
-                      >
-                        <Edit3 className="h-3.5 w-3.5" />
-                        Edit
-                      </button>
-                    </>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      void downloadWithAuth(`/apps/${app.id}/export?format=json`, `${app.slug}-export.json`)
-                    }
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 hover:bg-slate-50 dark:border-slate-700"
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                    JSON
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      void downloadWithAuth(`/apps/${app.id}/export?format=csv`, `${app.slug}-users.csv`)
-                    }
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 hover:bg-slate-50 dark:border-slate-700"
-                  >
-                    CSV
-                  </button>
-
-                  {hasPerm('apps.manage') && (
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <button
                       type="button"
-                      aria-label={`Delete ${app.name}`}
-                      onClick={() => setDeleteAppTarget(app)}
-                      className="rounded-lg border border-red-200 p-1.5 text-red-600 hover:bg-red-50 dark:border-red-900"
+                      onClick={() => onNavigate(`app-workspace:${app.id}`)}
+                      className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2.5 py-1.5 font-medium text-white hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500"
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
+                      <Terminal className="h-3.5 w-3.5" />
+                      Open App Console
                     </button>
-                  )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedAppId(isScoped ? 'all' : app.id);
+                        pushToast({
+                          type: 'info',
+                          title: isScoped ? 'Switched workspace to All Apps' : `Workspace scoped to ${app.name}`,
+                        });
+                      }}
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 font-medium ${
+                        isScoped
+                          ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500 dark:bg-blue-950/40 dark:text-blue-300'
+                          : 'border-slate-200 hover:bg-slate-50 dark:border-slate-700'
+                      }`}
+                    >
+                      <Layers className="h-3.5 w-3.5" />
+                      {isScoped ? 'Clear Scope' : 'Scope App'}
+                    </button>
+
+                    {hasPerm('apps.manage') && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const nextStatus = app.status === 'connected' ? 'disconnected' : 'connected';
+                            await apiRequest(`/apps/${app.id}`, {
+                              method: 'PATCH',
+                              body: JSON.stringify({ status: nextStatus }),
+                            });
+                            pushToast({ type: 'success', title: `${app.name} is now ${nextStatus}` });
+                            await loadOverview();
+                            await refreshApps();
+                          }}
+                          className="rounded-lg border border-slate-200 px-2.5 py-1.5 hover:bg-slate-50 dark:border-slate-700"
+                        >
+                          {app.status === 'connected' ? 'Disconnect' : 'Connect'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingApp(app)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 hover:bg-slate-50 dark:border-slate-700"
+                        >
+                          <Edit3 className="h-3.5 w-3.5" />
+                          Edit
+                        </button>
+                      </>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void downloadWithAuth(`/apps/${app.id}/export?format=json`, `${app.slug}-export.json`)
+                      }
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 hover:bg-slate-50 dark:border-slate-700"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      JSON
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void downloadWithAuth(`/apps/${app.id}/export?format=csv`, `${app.slug}-users.csv`)
+                      }
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 hover:bg-slate-50 dark:border-slate-700"
+                    >
+                      CSV
+                    </button>
+
+                    {hasPerm('apps.manage') && (
+                      <button
+                        type="button"
+                        aria-label={`Delete ${app.name}`}
+                        onClick={() => setDeleteAppTarget(app)}
+                        className="rounded-lg border border-red-200 p-1.5 text-red-600 hover:bg-red-50 dark:border-red-900"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
+              );
+            })}
+          </div>
+
+          {overview?.pagination && overview.pagination.total > overview.pagination.limit && (
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-400">
+              <span className="tabular-nums">
+                Page {overview.pagination.page} of {overview.pagination.totalPages} · {overview.pagination.total.toLocaleString()} matching apps
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={overview.pagination.page <= 1}
+                  onClick={() => setDirPage((p) => Math.max(1, p - 1))}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-medium hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900"
+                >
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  disabled={overview.pagination.page >= overview.pagination.totalPages}
+                  onClick={() => setDirPage((p) => p + 1)}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-medium hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900"
+                >
+                  Next
+                </button>
               </div>
-            );
-          })}
+            </div>
+          )}
         </div>
       )}
 
       {/* Edit App Modal */}
       {editingApp && (
-        <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+        <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 overflow-y-auto">
           <form
             onSubmit={handleSaveEditApp}
-            className="w-full max-w-lg space-y-3 rounded-xl border border-slate-200 bg-white p-6 text-xs dark:border-slate-800 dark:bg-slate-900"
+            className="my-auto w-full max-w-lg space-y-3 rounded-xl border border-slate-200 bg-white p-6 text-xs dark:border-slate-800 dark:bg-slate-900"
           >
             <h2 className="font-display text-base font-semibold">Edit App: {editingApp.name}</h2>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block font-medium">Name</label>
+                <label className="block font-medium">Name (app_name)</label>
                 <input
                   required
                   value={editingApp.name}
@@ -2456,7 +2689,7 @@ export const AppsCenterPage: React.FC<{
                 </select>
               </div>
               <div>
-                <label className="block font-medium">Current Version</label>
+                <label className="block font-medium">Version Name (version_name)</label>
                 <input
                   value={editingApp.currentVersion}
                   onChange={(e) => setEditingApp({ ...editingApp, currentVersion: e.target.value })}
@@ -2464,6 +2697,21 @@ export const AppsCenterPage: React.FC<{
                 />
               </div>
               <div>
+                <label className="block font-medium">Version Code (version_code)</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={editingApp.versionCode ?? 1}
+                  onChange={(e) =>
+                    setEditingApp({
+                      ...editingApp,
+                      versionCode: Math.max(1, Math.floor(Number(e.target.value) || 1)),
+                    })
+                  }
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
+              <div className="col-span-2">
                 <label className="block font-medium">Min Supported Version</label>
                 <input
                   value={editingApp.minSupportedVersion}
@@ -2483,7 +2731,7 @@ export const AppsCenterPage: React.FC<{
                     packageOrDomain: e.target.value,
                   })
                 }
-                placeholder="com.cyberking.candymindmatch"
+                placeholder="com.company.myapp"
                 className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
               />
             </div>
@@ -2494,6 +2742,44 @@ export const AppsCenterPage: React.FC<{
                 onChange={(e) => setEditingApp({ ...editingApp, admobAppId: e.target.value })}
                 className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
               />
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <label className="block font-medium">Firebase Project ID (optional)</label>
+                <input
+                  value={editingApp.firebaseProjectId || ''}
+                  onChange={(e) => setEditingApp({ ...editingApp, firebaseProjectId: e.target.value })}
+                  placeholder="my-firebase-project"
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
+              <div>
+                <label className="block font-medium">Firebase App ID (optional)</label>
+                <input
+                  value={editingApp.firebaseAppId || ''}
+                  onChange={(e) => setEditingApp({ ...editingApp, firebaseAppId: e.target.value })}
+                  placeholder="1:123456789012:android:abc123def456"
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
+              <div>
+                <label className="block font-medium">Firebase Project Number (optional)</label>
+                <input
+                  value={editingApp.firebaseProjectNumber || ''}
+                  onChange={(e) => setEditingApp({ ...editingApp, firebaseProjectNumber: e.target.value })}
+                  placeholder="123456789012"
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
+              <div>
+                <label className="block font-medium">Firebase Storage Bucket (optional)</label>
+                <input
+                  value={editingApp.firebaseStorageBucket || ''}
+                  onChange={(e) => setEditingApp({ ...editingApp, firebaseStorageBucket: e.target.value })}
+                  placeholder="my-firebase-project.firebasestorage.app"
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-3 font-mono dark:border-slate-700 dark:bg-slate-950"
+                />
+              </div>
             </div>
             <div>
               <label className="block font-medium">Maintenance Message</label>
@@ -2532,6 +2818,17 @@ export const AppsCenterPage: React.FC<{
           </form>
         </div>
       )}
+
+      <ConnectAppModal
+        open={showConnectModal}
+        onClose={() => setShowConnectModal(false)}
+        onConnected={async () => {
+          setDirPage(1);
+          await loadOverview();
+          await refreshApps();
+        }}
+        onOpenWorkspace={(appId) => onNavigate(`app-workspace:${appId}`)}
+      />
 
       <ConfirmDialog
         open={Boolean(deleteAppTarget)}

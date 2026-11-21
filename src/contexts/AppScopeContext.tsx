@@ -13,11 +13,26 @@ export interface ConnectedAppRecord {
   description: string;
   status: 'connected' | 'disconnected' | 'maintenance' | string;
   currentVersion: string;
+  versionCode?: number;
   minSupportedVersion: string;
   forceUpdate: boolean;
   maintenanceMessage: string;
   admobAppId: string;
   adsEnabled: boolean;
+  firebaseProjectId?: string;
+  firebaseAppId?: string;
+  firebaseProjectNumber?: string;
+  firebaseStorageBucket?: string;
+  connectionConfig?: {
+    firebase_project_id?: string;
+    firebase_app_id?: string;
+    firebase_project_number?: string;
+    firebase_storage_bucket?: string;
+    require_sdk_key?: boolean;
+    auth_mode?: string;
+    sync_mode?: string;
+    sync_url?: string;
+  };
   healthStatus: 'healthy' | 'degraded' | 'offline' | string;
   lastHeartbeatAt: string | null;
   lastLatencyMs: number;
@@ -76,7 +91,7 @@ export const AppScopeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
     setLoading(true);
     try {
-      const res = await apiRequest<{ data: ConnectedAppRecord[] }>('/apps');
+      const res = await apiRequest<{ data: ConnectedAppRecord[] }>('/apps?limit=100');
       setApps(res.data || []);
       setSelectedAppIdState((prev) => {
         if (prev === 'all') return 'all';
